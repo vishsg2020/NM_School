@@ -11,6 +11,12 @@
 [context.production]
   command = "npm test && npm run migrate"
 
+# Branch deploys (e.g. the "stage" branch): same as production, so the database they point at
+# (DATABASE_URL for the "Branch deploys" context) always has the tables the code expects.
+# Deploy previews (pull requests) do not migrate.
+[context.branch-deploy]
+  command = "npm test && npm run migrate"
+
 [build.environment]
   NODE_VERSION = "22"
   APP_TZ = "Asia/Kolkata"
