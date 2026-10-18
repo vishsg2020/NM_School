@@ -3,11 +3,14 @@
 process.env.TODAY_OVERRIDE = '2026-10-15';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { open } = require('../src/db');
+const path = require('path');
+const pg = require('pg');
+const { createDb } = require('../src/db');
+const { applyMigrations } = require('../src/migrate');
 const { createApp } = require('../src/app');
 const { hashPassword } = require('../src/auth');
 
-let server, base, db;
+let server, base, db, devDb, pool;
 const pw = 'correct-horse-1';
 
 function client() {
@@ -33,15 +36,20 @@ const M = client(), S = client(), T1 = client(), T2 = client(), anon = client();
 let teacherA, teacherB, salesId, managerId;
 
 test.before(async () => {
-  db = open(':memory:');
+  const { NetlifyDB } = await import('@netlify/database-dev');
+  devDb = new NetlifyDB({ logger: () => {} });
+  const cs = await devDb.start();
+  pool = new pg.Pool({ connectionString: cs, max: 4 });
+  await applyMigrations(pool);
+  db = createDb(pool);
   const h = hashPassword(pw);
-  managerId = db.prepare(`INSERT INTO users (name,email,password_hash,role) VALUES ('Anasooya','m@x.in',?,'manager')`).run(h).lastInsertRowid;
-  salesId = db.prepare(`INSERT INTO users (name,email,password_hash,role) VALUES ('Sam Sales','s@x.in',?,'sales')`).run(h).lastInsertRowid;
+  managerId = (await db.get(`INSERT INTO users (name,email,password_hash,role) VALUES ('Anasooya','m@x.in',?,'manager') RETURNING id`, [h])).id;
+  salesId = (await db.get(`INSERT INTO users (name,email,password_hash,role) VALUES ('Sam Sales','s@x.in',?,'sales') RETURNING id`, [h])).id;
   server = createApp(db).listen(0);
   base = `http://127.0.0.1:${server.address().port}`;
   await M.login('m@x.in'); await S.login('s@x.in');
 });
-test.after(() => { server.close(); db.close(); });
+test.after(async () => { server.close(); await pool.end(); await devDb.stop(); });
 
 test('server rejects unauthenticated and cross-site style requests', async () => {
   assert.equal((await anon.get('/api/candidates')).status, 401);
@@ -101,7 +109,7 @@ test('Manager and Sales Team can add candidates; no duplicate on repeat submit',
   assert.equal((await M.post('/api/candidates', { lead_id: 'fb-2201', student_name: 'Zed', phone: '9847000002' })).status, 409);
   // teacher cannot add
   assert.equal((await T1.post('/api/candidates', { student_name: 'X', phone: '9847000003' })).status, 403);
-  assert.equal(db.prepare('SELECT COUNT(*) n FROM candidates').get().n, 3);
+  assert.equal((await db.get('SELECT COUNT(*) n FROM candidates')).n, 3);
 });
 
 test('Sales Team and Manager can update pre-test date/time and confirmation; only Manager assigns teacher', async () => {
@@ -149,12 +157,12 @@ test('Assessment retains Lead ID and Sales Rep; Confirmed creates Student but no
   const c = (await M.get(`/api/candidates/${candA.id}`)).data;
   assert.equal(c.lead_id, candA.lead_id); assert.equal(c.sales_rep_id, salesId); assert.equal(c.status, 'Completed');
   assert.ok(c.student_id); studentId = c.student_id;
-  assert.equal(db.prepare('SELECT COUNT(*) n FROM enrollments').get().n, 0);
+  assert.equal((await db.get('SELECT COUNT(*) n FROM enrollments')).n, 0);
   const pending = (await M.get('/api/admissions/pending')).data;
   assert.equal(pending.length, 1); assert.equal(pending[0].lead_id, candA.lead_id); assert.equal(pending[0].sales_rep_name, 'Sam Sales');
   // re-submit does not create a second student
   await T1.put(`/api/candidates/${candA.id}/result`, { recommended_course: 'Reader', assessment: 'updated', admission_status: 'Confirmed' });
-  assert.equal(db.prepare('SELECT COUNT(*) n FROM students').get().n, 1);
+  assert.equal((await db.get('SELECT COUNT(*) n FROM students')).n, 1);
 });
 
 let enrollment;
@@ -168,7 +176,7 @@ test('Admission: mismatch error only on a genuine mismatch, explained; creates o
   let r = await M.post('/api/admissions', body);
   assert.equal(r.status, 422); assert.equal(r.data.code, 'FEE_MISMATCH'); assert.equal(r.data.difference, 100);
   assert.match(r.data.error, /₹100 less than the Total Course Fee of ₹1,000/);
-  assert.equal(db.prepare('SELECT COUNT(*) n FROM enrollments').get().n, 0);
+  assert.equal((await db.get('SELECT COUNT(*) n FROM enrollments')).n, 0);
   assert.equal((await S.post('/api/admissions', body)).status, 403);
   body.final.amount = 600;
   r = await M.post('/api/admissions', body);
@@ -179,8 +187,8 @@ test('Admission: mismatch error only on a genuine mismatch, explained; creates o
   // repeat click (same key) and different key both produce no second enrollment
   r = await M.post('/api/admissions', body); assert.equal(r.status, 200); assert.equal(r.data.id, enrollment.id);
   r = await M.post('/api/admissions', { ...body, idempotency_key: 'adm-2' }); assert.equal(r.status, 409);
-  assert.equal(db.prepare('SELECT COUNT(*) n FROM enrollments').get().n, 1);
-  assert.equal(db.prepare('SELECT COUNT(*) n FROM payments').get().n, 2);
+  assert.equal((await db.get('SELECT COUNT(*) n FROM enrollments')).n, 1);
+  assert.equal((await db.get('SELECT COUNT(*) n FROM payments')).n, 2);
   // pre-test teacher and teaching teacher may differ is allowed by design (teacherA used for both here)
   // confirmed admission status is locked once enrolled
   assert.equal((await M.put(`/api/candidates/${candA.id}/result`, { recommended_course: 'Reader', assessment: 'x', admission_status: 'Not Interested' })).status, 400);
@@ -275,7 +283,7 @@ test('Class completion increments once; repeats do not double-count; cancelled d
   r = await T1.patch(`/api/classes/${c1}`, { status: 'Completed', attendance: 'Present', topics: 'Vowels (edited)' });
   assert.equal(r.data.completed_classes, 1);
   await Promise.all([1, 2, 3].map(() => T1.patch(`/api/classes/${c1}`, { status: 'Completed', attendance: 'Present' })));
-  assert.equal(db.prepare('SELECT completed_classes FROM enrollments WHERE id = ?').get(enrollment.id).completed_classes, 1);
+  assert.equal((await db.get('SELECT completed_classes FROM enrollments WHERE id = ?', [enrollment.id])).completed_classes, 1);
   // Completed requires Present/Late
   assert.equal((await T1.patch(`/api/classes/${c2}`, { status: 'Completed', attendance: 'Absent' })).status, 400);
   // future class can't be completed (c3 is 2026-10-20)
@@ -314,9 +322,9 @@ test('Dashboard and report totals reconcile to records', async () => {
   assert.equal(d.total_students, (await M.get('/api/students')).data.length);
   assert.equal(d.active_enrollments, (await M.get('/api/enrollments?status=Active')).data.length);
   assert.equal(rep.payment_followup.length, pendRows.rows.length);
-  const completed = db.prepare('SELECT COUNT(*) n FROM classes WHERE counted = 1').get().n;
+  const completed = (await db.get('SELECT COUNT(*) n FROM classes WHERE counted = 1')).n;
   assert.equal(rep.delivery_trend.at(-1).completed, completed);
-  assert.equal(db.prepare('SELECT SUM(completed_classes) n FROM enrollments').get().n, completed);
+  assert.equal((await db.get('SELECT SUM(completed_classes) n FROM enrollments')).n, completed);
   const sam = rep.by_sales_rep.find(r => r.name === 'Sam Sales');
   assert.equal(sam.admissions, 1);
   const mgr = rep.by_sales_rep.find(r => r.name === 'Anasooya');

@@ -1,9 +1,10 @@
 'use strict';
 const { requireRole } = require('../auth');
 const { audit, history } = require('../audit');
+const { isUniqueViolation } = require('../db');
 const { COURSES } = require('./candidates');
 const {
-  bad, notFound, conflict, unprocessable, str, int, oneOf, bool, isValidDate, today, inr,
+  bad, notFound, conflict, unprocessable, str, int, oneOf, isValidDate, today, inr, idParam,
 } = require('../util');
 
 const METHODS = ['UPI', 'Bank Transfer', 'Cash', 'Card', 'Other'];
@@ -62,11 +63,12 @@ function teacherSafe(e) {
 }
 
 module.exports = (app, { db }) => {
-  const paymentsOf = id => db.prepare(`SELECT * FROM payments WHERE enrollment_id = ? ORDER BY CASE stage WHEN 'Advance' THEN 0 ELSE 1 END`).all(id);
+  const paymentsOf = (id, t = db) => t.all(`SELECT * FROM payments WHERE enrollment_id = ? ORDER BY CASE stage WHEN 'Advance' THEN 0 ELSE 1 END`, [id]);
+  const enrollmentById = id => db.get(`${ENROLL_SELECT} WHERE e.id = ?`, [id]);
 
   // Students with a Confirmed assessment and no enrollment yet.
-  app.get('/api/admissions/pending', requireRole('manager'), (_req, res) => {
-    res.json(db.prepare(`
+  app.get('/api/admissions/pending', requireRole('manager'), async (_req, res) => {
+    res.json(await db.all(`
       SELECT s.id AS student_id, c.id AS candidate_id, c.lead_id, c.student_name, c.parent_name, c.age, c.location,
              r.name AS sales_rep_name, c.sales_rep_id, pr.recommended_course, pr.submitted_at, pr.recommendation,
              t.name AS pretest_teacher_name
@@ -75,19 +77,22 @@ module.exports = (app, { db }) => {
       JOIN users r ON r.id = c.sales_rep_id
       JOIN teachers t ON t.id = pr.teacher_id
       WHERE NOT EXISTS (SELECT 1 FROM enrollments e WHERE e.student_id = s.id)
-      ORDER BY pr.submitted_at`).all());
+      ORDER BY pr.submitted_at`));
   });
 
-  app.post('/api/admissions', requireRole('manager'), (req, res) => {
+  app.post('/api/admissions', requireRole('manager'), async (req, res) => {
     const b = req.body;
     const key = str(b.idempotency_key, { max: 80, name: 'Request key' });
-    if (key) {
-      const prior = db.prepare('SELECT id FROM enrollments WHERE idempotency_key = ?').get(key);
-      if (prior) return res.status(200).json({ ...db.prepare(`${ENROLL_SELECT} WHERE e.id = ?`).get(prior.id), payments: paymentsOf(prior.id), replayed: true });
-    }
+    const replay = async () => {
+      const prior = key && (await db.get('SELECT id FROM enrollments WHERE idempotency_key = ?', [key]));
+      return prior ? { ...(await enrollmentById(prior.id)), payments: await paymentsOf(prior.id), replayed: true } : null;
+    };
+    const earlier = await replay();
+    if (earlier) return res.status(200).json(earlier);
+
     const studentId = int(b.student_id, { min: 1, required: true, name: 'Student' });
-    const st = db.prepare(`SELECT s.*, c.lead_id, c.sales_rep_id, pr.admission_status FROM students s
-      JOIN candidates c ON c.id = s.candidate_id LEFT JOIN pretest_results pr ON pr.candidate_id = c.id WHERE s.id = ?`).get(studentId);
+    const st = await db.get(`SELECT s.*, c.lead_id, c.sales_rep_id, pr.admission_status FROM students s
+      JOIN candidates c ON c.id = s.candidate_id LEFT JOIN pretest_results pr ON pr.candidate_id = c.id WHERE s.id = ?`, [studentId]);
     if (!st) throw notFound('Student');
     if (st.admission_status !== 'Confirmed') throw bad('Admission requires a Confirmed pre-test assessment');
 
@@ -102,7 +107,7 @@ module.exports = (app, { db }) => {
       notes: str(b.notes, { name: 'Notes', max: 2000 }),
     };
     if (!isValidDate(e.start_date)) throw bad('Start date is not valid', { field: 'Start date' });
-    const t = db.prepare('SELECT * FROM teachers WHERE id = ?').get(e.teacher_id);
+    const t = await db.get('SELECT * FROM teachers WHERE id = ?', [e.teacher_id]);
     if (!t) throw bad('Teaching teacher not found');
     if (!t.active) throw bad('Teaching teacher is inactive');
     if (e.class_mode === '1:1' && !t.supports_1to1) throw bad(`${t.name} is not configured for 1:1 classes`);
@@ -116,61 +121,73 @@ module.exports = (app, { db }) => {
         code: 'FEE_MISMATCH', difference: e.total_fee - (adv.amount + fin.amount),
       });
     }
-    if (db.prepare(`SELECT 1 FROM enrollments WHERE student_id = ? AND status = 'Active'`).get(studentId)) {
+    if (await db.get(`SELECT 1 AS x FROM enrollments WHERE student_id = ? AND status = 'Active'`, [studentId])) {
       throw conflict('This student already has an active enrollment', { code: 'ALREADY_ENROLLED' });
     }
 
-    const id = db.transaction(() => {
-      const r = db.prepare(`INSERT INTO enrollments (student_id, course, class_mode, total_classes, teacher_id, start_date,
-        admission_date, total_fee, lead_id, sales_rep_id, notes, idempotency_key, created_by)
-        VALUES (@student_id, @course, @class_mode, @total_classes, @teacher_id, @start_date, @admission_date, @total_fee,
-        @lead_id, @sales_rep_id, @notes, @key, @by)`).run({
-        ...e, admission_date: today(), lead_id: st.lead_id, sales_rep_id: st.sales_rep_id, key, by: req.user.id,
+    let id;
+    try {
+      id = await db.tx(async tx => {
+        const r = await tx.get(`INSERT INTO enrollments (student_id, course, class_mode, total_classes, teacher_id, start_date,
+          admission_date, total_fee, lead_id, sales_rep_id, notes, idempotency_key, created_by)
+          VALUES (@student_id, @course, @class_mode, @total_classes, @teacher_id, @start_date, @admission_date, @total_fee,
+          @lead_id, @sales_rep_id, @notes, @key, @by) RETURNING id`, {
+          ...e, admission_date: today(), lead_id: st.lead_id, sales_rep_id: st.sales_rep_id, key, by: req.user.id,
+        });
+        for (const p of [adv, fin]) {
+          await tx.run(`INSERT INTO payments (enrollment_id, stage, amount, status, date, method, reference)
+            VALUES (@eid, @stage, @amount, @status, @date, @method, @reference)`, { ...p, eid: r.id });
+        }
+        await audit(tx, req.user, 'enrollment', r.id, 'admitted', null, { ...e, advance: adv, final: fin });
+        return r.id;
       });
-      const ins = db.prepare(`INSERT INTO payments (enrollment_id, stage, amount, status, date, method, reference)
-        VALUES (@eid, @stage, @amount, @status, @date, @method, @reference)`);
-      for (const p of [adv, fin]) ins.run({ ...p, eid: r.lastInsertRowid });
-      audit(db, req.user, 'enrollment', r.lastInsertRowid, 'admitted', null, { ...e, advance: adv, final: fin });
-      return r.lastInsertRowid;
-    })();
-    res.status(201).json({ ...db.prepare(`${ENROLL_SELECT} WHERE e.id = ?`).get(id), payments: paymentsOf(id) });
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        const again = await replay();
+        if (again) return res.status(200).json(again);
+        throw conflict('This student already has an active enrollment', { code: 'ALREADY_ENROLLED' });
+      }
+      throw err;
+    }
+    res.status(201).json({ ...(await enrollmentById(id)), payments: await paymentsOf(id) });
   });
 
   // ---------- Enrollments ----------
-  app.get('/api/enrollments', requireRole('manager', 'teacher'), (req, res) => {
+  app.get('/api/enrollments', requireRole('manager', 'teacher'), async (req, res) => {
     const q = req.query; const where = []; const p = {};
     if (req.user.role === 'teacher') { where.push('e.teacher_id = @me'); p.me = req.user.teacher_id; }
     if (q.status) { where.push('e.status = @status'); p.status = q.status; }
-    if (q.teacher && req.user.role === 'manager') { where.push('e.teacher_id = @tid'); p.tid = Number(q.teacher); }
+    if (q.teacher && req.user.role === 'manager') { where.push('e.teacher_id = @tid'); p.tid = idParam(q.teacher); }
     if (q.course) { where.push('e.course = @course'); p.course = q.course; }
     if (q.mode) { where.push('e.class_mode = @mode'); p.mode = q.mode; }
-    if (q.sales_rep && req.user.role === 'manager') { where.push('e.sales_rep_id = @rep'); p.rep = Number(q.sales_rep); }
+    if (q.sales_rep && req.user.role === 'manager') { where.push('e.sales_rep_id = @rep'); p.rep = idParam(q.sales_rep); }
     if (q.month && /^\d{4}-\d{2}$/.test(q.month)) { where.push('substr(e.admission_date,1,7) = @month'); p.month = q.month; }
-    if (q.q) { where.push('(c.student_name LIKE @q OR c.lead_id LIKE @q OR c.parent_name LIKE @q)'); p.q = `%${q.q}%`; }
-    let rows = db.prepare(`${ENROLL_SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY e.id DESC`).all(p);
+    if (q.q) { where.push('(c.student_name ILIKE @q OR c.lead_id ILIKE @q OR c.parent_name ILIKE @q)'); p.q = `%${q.q}%`; }
+    let rows = await db.all(`${ENROLL_SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY e.id DESC`, p);
     if (req.user.role === 'teacher') rows = rows.map(teacherSafe);
     else {
-      const pays = db.prepare('SELECT * FROM payments WHERE enrollment_id = ?');
-      rows = rows.map(r => ({ ...r, money: moneySummary(r.total_fee, pays.all(r.id)) }));
+      const ids = rows.map(r => r.id);
+      const pays = ids.length ? await db.all('SELECT * FROM payments WHERE enrollment_id = ANY(?::int[])', [ids]) : [];
+      rows = rows.map(r => ({ ...r, money: moneySummary(r.total_fee, pays.filter(x => x.enrollment_id === r.id)) }));
     }
     res.json(rows);
   });
 
-  app.get('/api/enrollments/:id', requireRole('manager', 'teacher'), (req, res) => {
-    const e = db.prepare(`${ENROLL_SELECT} WHERE e.id = ?`).get(req.params.id);
+  app.get('/api/enrollments/:id', requireRole('manager', 'teacher'), async (req, res) => {
+    const e = await enrollmentById(idParam(req.params.id));
     if (!e || (req.user.role === 'teacher' && e.teacher_id !== req.user.teacher_id)) throw notFound('Enrollment');
     if (req.user.role === 'teacher') return res.json(teacherSafe(e));
-    const payments = paymentsOf(e.id);
-    res.json({ ...e, payments, money: moneySummary(e.total_fee, payments), history: history(db, 'enrollment', e.id) });
+    const payments = await paymentsOf(e.id);
+    res.json({ ...e, payments, money: moneySummary(e.total_fee, payments), history: await history(db, 'enrollment', e.id) });
   });
 
-  app.patch('/api/enrollments/:id', requireRole('manager'), (req, res) => {
-    const before = db.prepare('SELECT * FROM enrollments WHERE id = ?').get(req.params.id);
+  app.patch('/api/enrollments/:id', requireRole('manager'), async (req, res) => {
+    const before = await db.get('SELECT * FROM enrollments WHERE id = ?', [idParam(req.params.id)]);
     if (!before) throw notFound('Enrollment');
     const b = req.body; const e = { ...before };
     if (b.teacher_id !== undefined) {
       e.teacher_id = int(b.teacher_id, { min: 1, required: true, name: 'Teaching teacher' });
-      const t = db.prepare('SELECT * FROM teachers WHERE id = ?').get(e.teacher_id);
+      const t = await db.get('SELECT * FROM teachers WHERE id = ?', [e.teacher_id]);
       if (!t || !t.active) throw bad('Teaching teacher must be active');
       if ((e.class_mode === '1:1' && !t.supports_1to1) || (e.class_mode === '3:1' && !t.supports_3to1)) throw bad(`${t.name} is not configured for ${e.class_mode}`);
     }
@@ -181,7 +198,7 @@ module.exports = (app, { db }) => {
     if (b.status !== undefined) {
       e.status = oneOf(b.status, ['Active', 'Completed', 'Paused', 'Cancelled'], { required: true, name: 'Status' });
       if (e.status === 'Active' && before.status !== 'Active' &&
-          db.prepare(`SELECT 1 FROM enrollments WHERE student_id = ? AND status='Active' AND id <> ?`).get(before.student_id, before.id))
+          (await db.get(`SELECT 1 AS x FROM enrollments WHERE student_id = ? AND status='Active' AND id <> ?`, [before.student_id, before.id])))
         throw conflict('This student already has another active enrollment');
     }
     if (b.start_date !== undefined) {
@@ -189,17 +206,19 @@ module.exports = (app, { db }) => {
       if (!isValidDate(e.start_date)) throw bad('Start date is not valid');
     }
     if (b.notes !== undefined) e.notes = str(b.notes, { name: 'Notes', max: 2000 });
-    db.transaction(() => {
-      db.prepare(`UPDATE enrollments SET teacher_id=@teacher_id, total_classes=@total_classes, status=@status,
-        start_date=@start_date, notes=@notes, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=@id`).run(e);
-      audit(db, req.user, 'enrollment', before.id, 'updated', before, e, str(b.reason, { max: 500 }));
-    })();
-    res.json(db.prepare(`${ENROLL_SELECT} WHERE e.id = ?`).get(before.id));
+    await db.tx(async tx => {
+      // Guarded update: completed_classes may have changed since we read it.
+      const r = await tx.run(`UPDATE enrollments SET teacher_id=@teacher_id, total_classes=@total_classes, status=@status,
+        start_date=@start_date, notes=@notes, updated_at=now_iso() WHERE id=@id AND completed_classes <= @total_classes`, e);
+      if (!r.rowCount) throw bad('Total classes cannot be less than the classes already completed');
+      await audit(tx, req.user, 'enrollment', before.id, 'updated', before, e, str(b.reason, { max: 500 }));
+    });
+    res.json(await enrollmentById(before.id));
   });
 
   // Changing money amounts goes through one endpoint so Advance + Final always equals the fee.
-  app.put('/api/enrollments/:id/fee-plan', requireRole('manager'), (req, res) => {
-    const e = db.prepare('SELECT * FROM enrollments WHERE id = ?').get(req.params.id);
+  app.put('/api/enrollments/:id/fee-plan', requireRole('manager'), async (req, res) => {
+    const e = await db.get('SELECT * FROM enrollments WHERE id = ?', [idParam(req.params.id)]);
     if (!e) throw notFound('Enrollment');
     const b = req.body;
     const fee = int(b.total_fee, { min: 0, max: 10_000_000, required: true, name: 'Total course fee' });
@@ -207,46 +226,46 @@ module.exports = (app, { db }) => {
     const fin = int(b.final_amount, { min: 0, max: 10_000_000, required: true, name: 'Final amount' });
     const reason = str(b.reason, { required: true, name: 'Reason for change', max: 500 });
     if (adv + fin !== fee) throw unprocessable(feeMismatchMessage(fee, adv, fin), { code: 'FEE_MISMATCH', difference: fee - adv - fin });
-    const pays = paymentsOf(e.id);
-    for (const p of pays) {
-      const amt = p.stage === 'Advance' ? adv : fin;
-      if (p.status === 'Paid' && p.amount !== amt) throw bad(`${p.stage} is already marked Paid; change its status to Pending first if the received amount was wrong`);
-    }
-    db.transaction(() => {
-      db.prepare(`UPDATE enrollments SET total_fee = ?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`).run(fee, e.id);
-      audit(db, req.user, 'enrollment', e.id, 'fee_changed', { total_fee: e.total_fee }, { total_fee: fee }, reason);
+    await db.tx(async tx => {
+      const pays = await tx.all(`SELECT * FROM payments WHERE enrollment_id = ? ORDER BY id FOR UPDATE`, [e.id]);
+      for (const p of pays) {
+        const amt = p.stage === 'Advance' ? adv : fin;
+        if (p.status === 'Paid' && p.amount !== amt) throw bad(`${p.stage} is already marked Paid; change its status to Pending first if the received amount was wrong`);
+      }
+      await tx.run('UPDATE enrollments SET total_fee = ?, updated_at=now_iso() WHERE id = ?', [fee, e.id]);
+      await audit(tx, req.user, 'enrollment', e.id, 'fee_changed', { total_fee: e.total_fee }, { total_fee: fee }, reason);
       for (const p of pays) {
         const amt = p.stage === 'Advance' ? adv : fin;
         if (amt !== p.amount) {
-          db.prepare(`UPDATE payments SET amount = ?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`).run(amt, p.id);
-          audit(db, req.user, 'payment', p.id, 'amount_changed', { amount: p.amount }, { amount: amt }, reason);
+          await tx.run('UPDATE payments SET amount = ?, updated_at=now_iso() WHERE id = ?', [amt, p.id]);
+          await audit(tx, req.user, 'payment', p.id, 'amount_changed', { amount: p.amount }, { amount: amt }, reason);
         }
       }
-    })();
-    const payments = paymentsOf(e.id);
+    });
+    const payments = await paymentsOf(e.id);
     res.json({ payments, money: moneySummary(fee, payments) });
   });
 
   // ---------- Payments ----------
-  app.get('/api/payments', requireRole('manager'), (req, res) => {
+  app.get('/api/payments', requireRole('manager'), async (req, res) => {
     const q = req.query; const where = []; const p = { today: today() };
     if (q.status === 'Paid' || q.status === 'Pending') { where.push('p.status = @status'); p.status = q.status; }
     if (q.status === 'Overdue') where.push(`p.status = 'Pending' AND p.date < @today`);
     if (q.stage === 'Advance' || q.stage === 'Final') { where.push('p.stage = @stage'); p.stage = q.stage; }
-    if (q.student) { where.push('e.student_id = @sid'); p.sid = Number(q.student); }
-    if (q.enrollment) { where.push('e.id = @eid'); p.eid = Number(q.enrollment); }
+    if (q.student) { where.push('e.student_id = @sid'); p.sid = idParam(q.student); }
+    if (q.enrollment) { where.push('e.id = @eid'); p.eid = idParam(q.enrollment); }
     if (q.date_from && isValidDate(q.date_from)) { where.push('p.date >= @df'); p.df = q.date_from; }
     if (q.date_to && isValidDate(q.date_to)) { where.push('p.date <= @dt'); p.dt = q.date_to; }
-    if (q.sales_rep) { where.push('e.sales_rep_id = @rep'); p.rep = Number(q.sales_rep); }
-    if (q.q) { where.push('(c.student_name LIKE @q OR c.lead_id LIKE @q OR p.reference LIKE @q)'); p.q = `%${q.q}%`; }
-    const rows = db.prepare(`
+    if (q.sales_rep) { where.push('e.sales_rep_id = @rep'); p.rep = idParam(q.sales_rep); }
+    if (q.q) { where.push('(c.student_name ILIKE @q OR c.lead_id ILIKE @q OR p.reference ILIKE @q)'); p.q = `%${q.q}%`; }
+    const rows = await db.all(`
       SELECT p.*, e.student_id, e.course, e.total_fee, e.lead_id, c.student_name, c.parent_name, c.phone,
              r.name AS sales_rep_name, (p.status = 'Pending' AND p.date < @today) AS overdue
       FROM payments p JOIN enrollments e ON e.id = p.enrollment_id
       JOIN students s ON s.id = e.student_id JOIN candidates c ON c.id = s.candidate_id
       JOIN users r ON r.id = e.sales_rep_id
       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-      ORDER BY (p.status = 'Pending') DESC, p.date ASC, p.id`).all(p);
+      ORDER BY (p.status = 'Pending') DESC, p.date ASC, p.id`, p);
     const totals = {
       paid: rows.filter(r => r.status === 'Paid').reduce((s, r) => s + r.amount, 0),
       pending: rows.filter(r => r.status === 'Pending').reduce((s, r) => s + r.amount, 0),
@@ -256,8 +275,8 @@ module.exports = (app, { db }) => {
     res.json({ rows, totals, today: p.today });
   });
 
-  app.patch('/api/payments/:id', requireRole('manager'), (req, res) => {
-    const before = db.prepare('SELECT * FROM payments WHERE id = ?').get(req.params.id);
+  app.patch('/api/payments/:id', requireRole('manager'), async (req, res) => {
+    const before = await db.get('SELECT * FROM payments WHERE id = ?', [idParam(req.params.id)]);
     if (!before) throw notFound('Payment');
     const b = req.body; const p = { ...before };
     if (b.amount !== undefined && Number(b.amount) !== before.amount) throw bad('Change amounts with “Edit fee plan” so Advance + Final stays equal to the course fee');
@@ -268,59 +287,57 @@ module.exports = (app, { db }) => {
     checkPaymentRules(p, p.stage);
     const reason = str(b.reason, { name: 'Reason', max: 500 });
     if (before.status === 'Paid' && p.status === 'Pending' && !reason) throw bad('Give a reason when reverting a Paid payment to Pending', { field: 'Reason' });
-    db.transaction(() => {
-      db.prepare(`UPDATE payments SET status=@status, date=@date, method=@method, reference=@reference,
-        updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=@id`).run(p);
-      audit(db, req.user, 'payment', p.id, before.status !== p.status ? `status_${p.status.toLowerCase()}` : 'updated', before, p, reason);
-    })();
-    res.json(db.prepare('SELECT * FROM payments WHERE id = ?').get(p.id));
+    await db.tx(async tx => {
+      await tx.run(`UPDATE payments SET status=@status, date=@date, method=@method, reference=@reference, updated_at=now_iso() WHERE id=@id`, p);
+      await audit(tx, req.user, 'payment', p.id, before.status !== p.status ? `status_${p.status.toLowerCase()}` : 'updated', before, p, reason);
+    });
+    res.json(await db.get('SELECT * FROM payments WHERE id = ?', [p.id]));
   });
 
-  app.get('/api/payments/:id/history', requireRole('manager'), (req, res) => {
-    res.json(history(db, 'payment', Number(req.params.id)));
+  app.get('/api/payments/:id/history', requireRole('manager'), async (req, res) => {
+    res.json(await history(db, 'payment', idParam(req.params.id)));
   });
 
   // ---------- Students ----------
-  app.get('/api/students', requireRole('manager', 'teacher'), (req, res) => {
+  app.get('/api/students', requireRole('manager', 'teacher'), async (req, res) => {
     const q = req.query; const where = []; const p = {};
     if (req.user.role === 'teacher') { where.push('EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND x.teacher_id = @me)'); p.me = req.user.teacher_id; }
-    if (q.q) { where.push('(c.student_name LIKE @q OR c.parent_name LIKE @q OR c.lead_id LIKE @q)'); p.q = `%${q.q}%`; }
+    if (q.q) { where.push('(c.student_name ILIKE @q OR c.parent_name ILIKE @q OR c.lead_id ILIKE @q)'); p.q = `%${q.q}%`; }
     if (q.status === 'awaiting') where.push('NOT EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id)');
-    if (q.admitted && /^\d{4}-\d{2}$/.test(q.admitted)) { where.push(`EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND substr(x.admission_date,1,7) = @adm)`); p.adm = q.admitted; }
+    if (q.admitted && /^\d{4}-\d{2}$/.test(q.admitted)) { where.push('EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND substr(x.admission_date,1,7) = @adm)'); p.adm = q.admitted; }
     if (q.status === 'active') where.push(`EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND x.status='Active')`);
-    const rows = db.prepare(`
+    const rows = await db.all(`
       SELECT s.id, s.created_at, c.id AS candidate_id, c.lead_id, c.student_name, c.parent_name, c.age, c.location,
              ${req.user.role === 'manager' ? 'c.phone,' : ''} r.name AS sales_rep_name,
              e.id AS enrollment_id, e.course, e.class_mode, e.status AS enrollment_status, t.name AS teacher_name,
              e.total_classes, e.completed_classes, (e.total_classes - e.completed_classes) AS remaining_classes
       FROM students s JOIN candidates c ON c.id = s.candidate_id JOIN users r ON r.id = c.sales_rep_id
-      LEFT JOIN enrollments e ON e.id = (SELECT id FROM enrollments x WHERE x.student_id = s.id ORDER BY (x.status='Active') DESC, x.id DESC LIMIT 1)
+      LEFT JOIN enrollments e ON e.id = (SELECT x.id FROM enrollments x WHERE x.student_id = s.id ORDER BY (x.status='Active') DESC, x.id DESC LIMIT 1)
       LEFT JOIN teachers t ON t.id = e.teacher_id
-      ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY c.student_name`).all(p);
+      ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY c.student_name`, p);
     res.json(rows);
   });
 
-  app.get('/api/students/:id', requireRole('manager', 'teacher'), (req, res) => {
-    const s = db.prepare(`SELECT s.id, s.created_at, c.*, c.id AS candidate_id, s.id AS id, r.name AS sales_rep_name
-      FROM students s JOIN candidates c ON c.id = s.candidate_id JOIN users r ON r.id = c.sales_rep_id WHERE s.id = ?`).get(req.params.id);
+  app.get('/api/students/:id', requireRole('manager', 'teacher'), async (req, res) => {
+    const s = await db.get(`SELECT c.*, c.id AS candidate_id, s.id AS id, s.created_at AS student_created_at, r.name AS sales_rep_name
+      FROM students s JOIN candidates c ON c.id = s.candidate_id JOIN users r ON r.id = c.sales_rep_id WHERE s.id = ?`, [idParam(req.params.id)]);
     if (!s) throw notFound('Student');
-    let enrollments = db.prepare(`${ENROLL_SELECT} WHERE e.student_id = ? ORDER BY e.id DESC`).all(s.id);
+    let enrollments = await db.all(`${ENROLL_SELECT} WHERE e.student_id = ? ORDER BY e.id DESC`, [s.id]);
     if (req.user.role === 'teacher') {
       enrollments = enrollments.filter(e => e.teacher_id === req.user.teacher_id);
       if (!enrollments.length) throw notFound('Student');
       enrollments = enrollments.map(teacherSafe);
       delete s.phone; delete s.phone_norm;
     } else {
-      enrollments = enrollments.map(e => { const pays = paymentsOf(e.id); return { ...e, payments: pays, money: moneySummary(e.total_fee, pays) }; });
+      for (const e of enrollments) { e.payments = await paymentsOf(e.id); e.money = moneySummary(e.total_fee, e.payments); }
     }
     delete s.idempotency_key;
-    const result = db.prepare(`SELECT pr.*, t.name AS teacher_name FROM pretest_results pr JOIN teachers t ON t.id = pr.teacher_id WHERE candidate_id = ?`).get(s.candidate_id);
+    const result = await db.get(`SELECT pr.*, t.name AS teacher_name FROM pretest_results pr JOIN teachers t ON t.id = pr.teacher_id WHERE candidate_id = ?`, [s.candidate_id]);
     const ids = enrollments.map(e => e.id);
-    const classes = ids.length ? db.prepare(`SELECT cl.*, t.name AS teacher_name FROM classes cl JOIN teachers t ON t.id = cl.teacher_id
-      WHERE cl.enrollment_id IN (${ids.map(() => '?').join(',')}) ORDER BY cl.scheduled_at DESC LIMIT 200`).all(...ids) : [];
+    const classes = ids.length ? await db.all(`SELECT cl.*, t.name AS teacher_name FROM classes cl JOIN teachers t ON t.id = cl.teacher_id
+      WHERE cl.enrollment_id = ANY(?::int[]) ORDER BY cl.scheduled_at DESC LIMIT 200`, [ids]) : [];
     res.json({ ...s, result, enrollments, classes });
   });
 };
 
 module.exports.moneySummary = moneySummary;
-module.exports.bool = bool;

@@ -1,0 +1,39 @@
+# Weekly database backup (Supabase's Free plan has no automatic backups).
+# Exports every table to JSON and stores it as a private workflow artifact for 90 days.
+# Setup: repository Settings → Secrets and variables → Actions → New secret
+#   DATABASE_URL = the same Supabase connection string Netlify uses
+# Optional secret DATABASE_CA_CERT = Supabase root certificate (PEM) for verified TLS.
+# Run it any time from the Actions tab ("Run workflow").
+name: Weekly database backup
+
+on:
+  schedule:
+    - cron: '30 20 * * 6'   # Saturdays 20:30 UTC = Sunday 02:00 IST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --omit=dev
+      - name: Export database
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_CA_CERT: ${{ secrets.DATABASE_CA_CERT }}
+          BACKUP_DIR: backups
+        run: npm run backup
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nm-school-backup-${{ github.run_number }}
+          path: backups/*.json
+          retention-days: 90
+          if-no-files-found: error

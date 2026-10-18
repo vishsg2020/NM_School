@@ -1,0 +1,61 @@
+# Netlify configuration for the Nalla Malayalam school app.
+# Static UI is served from public/; the API runs as one Netlify Function (netlify/functions/api.js);
+# data lives in Supabase Postgres (DATABASE_URL). Pending migrations in db/migrations are applied on production deploys.
+
+[build]
+  publish = "public"
+  command = "npm test"
+
+# Production deploys: run the tests, then bring the live database schema up to date.
+# A failing test or migration stops the deploy, so the live site never runs against the wrong schema.
+[context.production]
+  command = "npm test && npm run migrate"
+
+[build.environment]
+  NODE_VERSION = "22"
+  APP_TZ = "Asia/Kolkata"
+
+[functions]
+  node_bundler = "esbuild"
+  # Ship these as real node_modules instead of bundling (they load optional/native pieces dynamically).
+  external_node_modules = ["express", "pg", "bcryptjs"]
+  # Optional: Supabase's root certificate for verified TLS (see README). Ignored if the file is absent.
+  included_files = ["db/ca.crt"]
+
+# API → function. Express keeps seeing /api/... paths.
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+  force = true
+
+# Single-page app: every other path loads the app shell.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Content-Security-Policy = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "same-origin"
+    Strict-Transport-Security = "max-age=31536000"
+    X-Robots-Tag = "noindex"
+
+[[headers]]
+  for = "/fonts/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# App code changes with each deploy; let browsers revalidate.
+[[headers]]
+  for = "/js/*"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+[[headers]]
+  for = "/styles.css"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"

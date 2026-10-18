@@ -129,9 +129,14 @@ async function route() {
   const seq = ++renderSeq;
   if (!fn) { page.innerHTML = stateBox('error', 'Page not found', 'Use the menu to find what you need.'); return; }
   page.innerHTML = stateBox('loading');
+  // Render into a detached container and swap it in only if this is still the latest navigation,
+  // so a slow page can never overwrite the page the user moved on to.
+  const view = document.createElement('div');
   try {
-    await fn(page, { id: parts[1], query, isCurrent: () => seq === renderSeq });
-    if (seq === renderSeq) page.focus({ preventScroll: true });
+    await fn(view, { id: parts[1], query, isCurrent: () => seq === renderSeq });
+    if (seq !== renderSeq) return;
+    page.replaceChildren(view);
+    page.focus({ preventScroll: true });
     refreshBadges();
   } catch (err) {
     if (seq !== renderSeq) return;

@@ -77,6 +77,8 @@ function oneOf(v, list, { required = false, name = 'Field' } = {}) {
   if (!list.includes(v)) throw bad(`${name} must be one of: ${list.join(', ')}`, { field: name });
   return v;
 }
+/** Route/query id: a positive integer, or -1 (matches nothing) for anything else. */
+const idParam = v => (/^\d{1,9}$/.test(String(v ?? '')) ? Number(v) : -1);
 function bool(v) { return v === true || v === 1 || v === '1' || v === 'true'; }
 
 const normPhone = p => String(p || '').replace(/\D/g, '').replace(/^0+/, '');
@@ -89,5 +91,5 @@ function inr(n) {
 module.exports = {
   HttpError, bad, notFound, forbidden, conflict, unprocessable,
   TZ, nowParts, today, thisMonth, isValidDate, isValidDateTime, isValidTime, weekdayOf,
-  addMinutes, minutesOf, str, int, oneOf, bool, normPhone, normName, inr,
+  addMinutes, minutesOf, str, int, oneOf, bool, idParam, normPhone, normName, inr,
 };

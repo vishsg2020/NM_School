@@ -1,21 +1,37 @@
 'use strict';
 // Creates a SAMPLE database for trying the app. Never point this at the real database.
 // Usage: node scripts/seed-demo.js ./data/demo.db   (all names below are fictional)
+const path = require('path');
 const fs = require('fs');
-const { open } = require('../src/db');
+const pg = require('pg');
+const { createDb } = require('../src/db');
+const { applyMigrations } = require('../src/migrate');
 const { createApp } = require('../src/app');
 const { hashPassword } = require('../src/auth');
 const { today, addMinutes } = require('../src/util');
 
-const file = process.argv[2] || './data/demo.db';
-if (/nm-school\.db$/.test(file)) { console.error('Refusing to seed the production database name.'); process.exit(1); }
-for (const f of [file, file + '-wal', file + '-shm']) if (fs.existsSync(f)) fs.unlinkSync(f);
-const db = open(file);
+// Usage: node scripts/seed-demo.js [directory]   (default ./data/demo-pg; a separate local database)
+//    or: DEMO_DATABASE_URL=postgres://... node scripts/seed-demo.js   (an EMPTY database you created for demos)
+const dir = path.resolve(process.argv[2] || './data/demo-pg');
 const PW = 'demo-password';
+
+(async () => {
+let devDb = null;
+let cs = process.env.DEMO_DATABASE_URL;
+if (!cs) {
+  fs.rmSync(dir, { recursive: true, force: true });
+  const { NetlifyDB } = await import('@netlify/database-dev');
+  devDb = new NetlifyDB({ directory: dir, logger: () => {} });
+  cs = await devDb.start();
+}
+const pool = new pg.Pool({ connectionString: cs, max: 4 });
+await applyMigrations(pool);
+const db = createDb(pool);
+if ((await db.get('SELECT COUNT(*) n FROM users')).n) { console.error('Refusing to seed: this database already has users.'); process.exit(1); }
 const h = hashPassword(PW);
-db.prepare(`INSERT INTO users (name,email,password_hash,role) VALUES ('Demo Manager','manager@demo.local',?,'manager')`).run(h);
-db.prepare(`INSERT INTO users (name,email,password_hash,role) VALUES ('Demo Sales One','sales1@demo.local',?,'sales')`).run(h);
-db.prepare(`INSERT INTO users (name,email,password_hash,role) VALUES ('Demo Sales Two','sales2@demo.local',?,'sales')`).run(h);
+await db.run(`INSERT INTO users (name,email,password_hash,role) VALUES ('Demo Manager','manager@demo.local',?,'manager')`, [h]);
+await db.run(`INSERT INTO users (name,email,password_hash,role) VALUES ('Demo Sales One','sales1@demo.local',?,'sales')`, [h]);
+await db.run(`INSERT INTO users (name,email,password_hash,role) VALUES ('Demo Sales Two','sales2@demo.local',?,'sales')`, [h]);
 
 const server = createApp(db).listen(0);
 const base = `http://127.0.0.1:${server.address().port}`;
@@ -29,7 +45,6 @@ async function call(who, method, url, body) {
 }
 const day = n => addMinutes(`${today()}T00:00`, n * 1440).slice(0, 10);
 
-(async () => {
   await call('m', 'POST', '/api/login', { email: 'manager@demo.local', password: PW });
   await call('s', 'POST', '/api/login', { email: 'sales1@demo.local', password: PW });
   const wk = [1, 2, 3, 4, 5, 6];
@@ -77,6 +92,7 @@ const day = n => addMinutes(`${today()}T00:00`, n * 1440).slice(0, 10);
       await call('m', 'PATCH', `/api/classes/${cl.id}`, { status: 'Completed', attendance: 'Present', topics: 'Letters അ–ഈ', homework: 'Practice sheet' });
     }
   }
-  console.log(`Demo database written to ${file}. Sign in with manager@demo.local / sales1@demo.local / teacher@demo.local, password "${PW}".`);
-  server.close(); db.close();
-})().catch(e => { console.error(e); server.close(); process.exit(1); });
+  console.log(`Demo data written${devDb ? ' to ' + dir : ''}. Start it with: LOCAL_DB_DIR=${devDb ? dir : '<dir>'} npm start`);
+  console.log(`Sign in with manager@demo.local / sales1@demo.local / teacher@demo.local, password "${PW}".`);
+  server.close(); await pool.end(); if (devDb) await devDb.stop();
+})().catch(e => { console.error(e); process.exit(1); });
