@@ -1,0 +1,342 @@
+'use strict';
+// Acceptance tests mapped to the prompt's ACCEPTANCE TESTS list. Run: npm test
+process.env.TODAY_OVERRIDE = '2026-10-15';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { open } = require('../src/db');
+const { createApp } = require('../src/app');
+const { hashPassword } = require('../src/auth');
+
+let server, base, db;
+const pw = 'correct-horse-1';
+
+function client() {
+  let cookie = '';
+  async function call(method, url, body) {
+    const res = await fetch(base + url, {
+      method,
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'nm-app', ...(cookie ? { Cookie: cookie } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const sc = res.headers.get('set-cookie');
+    if (sc) cookie = sc.split(';')[0];
+    const data = await res.json().catch(() => null);
+    return { status: res.status, data };
+  }
+  return {
+    get: u => call('GET', u), post: (u, b) => call('POST', u, b), patch: (u, b) => call('PATCH', u, b), put: (u, b) => call('PUT', u, b),
+    login: async email => { const r = await call('POST', '/api/login', { email, password: pw }); assert.equal(r.status, 200, JSON.stringify(r.data)); return r; },
+  };
+}
+
+const M = client(), S = client(), T1 = client(), T2 = client(), anon = client();
+let teacherA, teacherB, salesId, managerId;
+
+test.before(async () => {
+  db = open(':memory:');
+  const h = hashPassword(pw);
+  managerId = db.prepare(`INSERT INTO users (name,email,password_hash,role) VALUES ('Anasooya','m@x.in',?,'manager')`).run(h).lastInsertRowid;
+  salesId = db.prepare(`INSERT INTO users (name,email,password_hash,role) VALUES ('Sam Sales','s@x.in',?,'sales')`).run(h).lastInsertRowid;
+  server = createApp(db).listen(0);
+  base = `http://127.0.0.1:${server.address().port}`;
+  await M.login('m@x.in'); await S.login('s@x.in');
+});
+test.after(() => { server.close(); db.close(); });
+
+test('server rejects unauthenticated and cross-site style requests', async () => {
+  assert.equal((await anon.get('/api/candidates')).status, 401);
+  const r = await fetch(base + '/api/candidates', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  assert.equal(r.status, 403);
+});
+
+test('Manager can add, edit, deactivate teachers and configure availability/capacity', async () => {
+  let r = await M.post('/api/teachers', {
+    name: 'Teacher A', supports_1to1: true, supports_3to1: true, monthly_capacity: 100, employment_type: 'Regular',
+    hours: [1, 2, 3, 4, 5, 6].map(d => ({ weekday: d, start_time: '09:00', end_time: '15:00' })),
+    slots: [1, 2, 3, 4, 5, 6].map(d => ({ weekday: d, start_time: '10:00', end_time: '14:00', format: 'Any' })),
+  });
+  assert.equal(r.status, 201, JSON.stringify(r.data)); teacherA = r.data.id;
+  assert.equal(r.data.hours.length, 6);
+  r = await M.post('/api/teachers', { name: 'Teacher B', supports_1to1: true, supports_3to1: false, employment_type: 'Freelance',
+    hours: [{ weekday: 4, start_time: '16:00', end_time: '21:00' }] });
+  assert.equal(r.status, 201); teacherB = r.data.id;
+  // slot outside hours rejected
+  r = await M.patch(`/api/teachers/${teacherB}`, { slots: [{ weekday: 4, start_time: '08:00', end_time: '09:00' }] });
+  assert.equal(r.status, 400);
+  r = await M.patch(`/api/teachers/${teacherB}`, { monthly_capacity: 40, notes: 'Evenings' });
+  assert.equal(r.data.monthly_capacity, 40);
+  // Sales and Teacher cannot manage teachers (server-side)
+  assert.equal((await S.post('/api/teachers', { name: 'X' })).status, 403);
+  assert.equal((await S.get('/api/teachers')).status, 403);
+  // logins for teachers
+  for (const [email, tid] of [['t1@x.in', teacherA], ['t2@x.in', teacherB]]) {
+    r = await M.post('/api/users', { name: email, email, password: pw, role: 'teacher', teacher_id: tid });
+    assert.equal(r.status, 201, JSON.stringify(r.data));
+  }
+  await T1.login('t1@x.in'); await T2.login('t2@x.in');
+  assert.equal((await T1.patch(`/api/teachers/${teacherA}`, { monthly_capacity: 999 })).status, 403);
+  // no hard-coded teacher limit: add 4 more
+  for (let i = 0; i < 4; i++) assert.equal((await M.post('/api/teachers', { name: 'Extra ' + i })).status, 201);
+});
+
+let candA, candB;
+test('Manager and Sales Team can add candidates; no duplicate on repeat submit', async () => {
+  let r = await S.post('/api/candidates', { student_name: 'Anu Nair', parent_name: 'Rekha', phone: '+1 (415) 555-0101', location: 'Texas', age: 8, idempotency_key: 'k-1' });
+  assert.equal(r.status, 201, JSON.stringify(r.data)); candA = r.data;
+  assert.match(candA.lead_id, /^NM-\d{5}$/);
+  assert.equal(candA.status, 'Time Required');
+  assert.equal(candA.sales_rep_id, salesId);
+  // same idempotency key => same record, no new row
+  r = await S.post('/api/candidates', { student_name: 'Anu Nair', phone: '+14155550101', idempotency_key: 'k-1' });
+  assert.equal(r.status, 200); assert.equal(r.data.id, candA.id);
+  // same name + phone with a fresh key => duplicate warning
+  r = await S.post('/api/candidates', { student_name: ' anu  nair ', phone: '14155550101', idempotency_key: 'k-2' });
+  assert.equal(r.status, 409); assert.equal(r.data.code, 'POSSIBLE_DUPLICATE');
+  // sibling sharing phone is allowed
+  r = await S.post('/api/candidates', { student_name: 'Arjun Nair', phone: '14155550101', idempotency_key: 'k-3', pretest_at: '2026-10-16T18:00' });
+  assert.equal(r.status, 201); candB = r.data; assert.equal(candB.status, 'Scheduled');
+  // manager adds with supplied lead id and assigns teacher
+  r = await M.post('/api/candidates', { lead_id: 'FB-2201', student_name: 'Diya', phone: '9847000001', sales_rep_id: salesId, pretest_at: '2026-10-17T10:00', pretest_teacher_id: teacherA });
+  assert.equal(r.status, 201); assert.equal(r.data.lead_id, 'FB-2201');
+  assert.equal((await M.post('/api/candidates', { lead_id: 'fb-2201', student_name: 'Zed', phone: '9847000002' })).status, 409);
+  // teacher cannot add
+  assert.equal((await T1.post('/api/candidates', { student_name: 'X', phone: '9847000003' })).status, 403);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM candidates').get().n, 3);
+});
+
+test('Sales Team and Manager can update pre-test date/time and confirmation; only Manager assigns teacher', async () => {
+  let r = await S.patch(`/api/candidates/${candA.id}`, { pretest_at: '2026-10-16T17:00', time_confirmation: 'Confirmed', status: 'Scheduled' });
+  assert.equal(r.status, 200); assert.equal(r.data.time_confirmation, 'Confirmed');
+  r = await M.patch(`/api/candidates/${candB.id}`, { pretest_at: '2026-10-18T09:30', time_confirmation: 'Reschedule Requested' });
+  assert.equal(r.status, 200);
+  assert.equal((await S.patch(`/api/candidates/${candA.id}`, { pretest_teacher_id: teacherA })).status, 403);
+  assert.equal((await S.patch(`/api/candidates/${candA.id}`, { status: 'Completed' })).status, 400);
+  r = await M.patch(`/api/candidates/${candA.id}`, { pretest_teacher_id: teacherA });
+  assert.equal(r.data.pretest_teacher_id, teacherA);
+  assert.equal((await T1.patch(`/api/candidates/${candA.id}`, { pretest_at: '2026-10-20T10:00' })).status, 403);
+  assert.equal((await M.patch(`/api/candidates/${candA.id}`, { status: 'Scheduled', pretest_at: '' })).status, 400);
+});
+
+test('Pre-Test Queue filters work individually and in combination; clearing restores all', async () => {
+  const ids = r => r.data.map(x => x.id).sort();
+  const all = await M.get('/api/candidates');
+  assert.equal(all.data.length, 3);
+  assert.deepEqual(ids(await M.get('/api/candidates?date=2026-10-16')), [candA.id]);
+  assert.deepEqual(ids(await M.get(`/api/candidates?teacher=${teacherA}`)).length, 2);
+  assert.deepEqual(ids(await M.get('/api/candidates?teacher=unassigned')), [candB.id]);
+  assert.deepEqual(ids(await M.get('/api/candidates?status=Scheduled')).length, 3);
+  assert.deepEqual(ids(await M.get('/api/candidates?confirmation=Confirmed')), [candA.id]);
+  assert.deepEqual(ids(await M.get('/api/candidates?confirmation=Reschedule%20Requested')), [candB.id]);
+  assert.deepEqual(ids(await M.get(`/api/candidates?teacher=${teacherA}&confirmation=Confirmed&date=2026-10-16&status=Scheduled`)), [candA.id]);
+  assert.equal((await M.get(`/api/candidates?teacher=${teacherA}&confirmation=Reschedule%20Requested`)).data.length, 0);
+  assert.equal((await M.get('/api/candidates?q=nair')).data.length, 2);
+  assert.equal((await M.get('/api/candidates?q=555-0101')).data.length, 2);
+  assert.equal((await M.get('/api/candidates')).data.length, all.data.length);
+  // Sales sees all (decision), teacher sees assigned only and no phone numbers
+  assert.equal((await S.get('/api/candidates')).data.length, 3);
+  const t = await T1.get('/api/candidates');
+  assert.equal(t.data.length, 2); assert.equal(t.data[0].phone, undefined);
+  assert.equal((await T2.get('/api/candidates')).data.length, 0);
+  assert.equal((await T2.get(`/api/candidates/${candA.id}`)).status, 404);
+});
+
+let studentId;
+test('Assessment retains Lead ID and Sales Rep; Confirmed creates Student but no Enrollment', async () => {
+  assert.equal((await T2.put(`/api/candidates/${candA.id}/result`, { recommended_course: 'Reader', assessment: 'x', admission_status: 'Confirmed' })).status, 404);
+  assert.equal((await S.put(`/api/candidates/${candA.id}/result`, {})).status, 403);
+  let r = await T1.put(`/api/candidates/${candA.id}/result`, { recommended_course: 'Reader', assessment: 'Knows letters, slow word reading', admission_status: 'Confirmed', recommendation: '1:1 twice a week' });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const c = (await M.get(`/api/candidates/${candA.id}`)).data;
+  assert.equal(c.lead_id, candA.lead_id); assert.equal(c.sales_rep_id, salesId); assert.equal(c.status, 'Completed');
+  assert.ok(c.student_id); studentId = c.student_id;
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM enrollments').get().n, 0);
+  const pending = (await M.get('/api/admissions/pending')).data;
+  assert.equal(pending.length, 1); assert.equal(pending[0].lead_id, candA.lead_id); assert.equal(pending[0].sales_rep_name, 'Sam Sales');
+  // re-submit does not create a second student
+  await T1.put(`/api/candidates/${candA.id}/result`, { recommended_course: 'Reader', assessment: 'updated', admission_status: 'Confirmed' });
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM students').get().n, 1);
+});
+
+let enrollment;
+test('Admission: mismatch error only on a genuine mismatch, explained; creates one Enrollment + Advance/Final', async () => {
+  const body = {
+    student_id: studentId, course: 'Reader', class_mode: '1:1', total_classes: 4, teacher_id: teacherA, start_date: '2026-10-15',
+    total_fee: 1000, idempotency_key: 'adm-1',
+    advance: { amount: 400, status: 'Paid', date: '2026-10-14', method: 'UPI', reference: 'UPI123' },
+    final: { amount: 500, status: 'Pending', date: '2026-10-10' },
+  };
+  let r = await M.post('/api/admissions', body);
+  assert.equal(r.status, 422); assert.equal(r.data.code, 'FEE_MISMATCH'); assert.equal(r.data.difference, 100);
+  assert.match(r.data.error, /₹100 less than the Total Course Fee of ₹1,000/);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM enrollments').get().n, 0);
+  assert.equal((await S.post('/api/admissions', body)).status, 403);
+  body.final.amount = 600;
+  r = await M.post('/api/admissions', body);
+  assert.equal(r.status, 201, JSON.stringify(r.data)); enrollment = r.data;
+  assert.equal(enrollment.payments.length, 2);
+  assert.deepEqual(enrollment.payments.map(p => p.stage), ['Advance', 'Final']);
+  assert.equal(enrollment.lead_id, candA.lead_id); assert.equal(enrollment.sales_rep_id, salesId);
+  // repeat click (same key) and different key both produce no second enrollment
+  r = await M.post('/api/admissions', body); assert.equal(r.status, 200); assert.equal(r.data.id, enrollment.id);
+  r = await M.post('/api/admissions', { ...body, idempotency_key: 'adm-2' }); assert.equal(r.status, 409);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM enrollments').get().n, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM payments').get().n, 2);
+  // pre-test teacher and teaching teacher may differ is allowed by design (teacherA used for both here)
+  // confirmed admission status is locked once enrolled
+  assert.equal((await M.put(`/api/candidates/${candA.id}/result`, { recommended_course: 'Reader', assessment: 'x', admission_status: 'Not Interested' })).status, 400);
+});
+
+test('Paid / Pending / Overdue totals are correct and edits are audited', async () => {
+  let r = await M.get(`/api/enrollments/${enrollment.id}`);
+  assert.deepEqual(r.data.money, { total_fee: 1000, total_paid: 400, outstanding: 600, pending_amount: 600, overdue_amount: 600 });
+  let d = (await M.get('/api/dashboard')).data.metrics;
+  assert.equal(d.fees_collected_total, 400); assert.equal(d.pending_fees, 600); assert.equal(d.overdue_fees, 600);
+  assert.equal(d.students_pending_payments, 1); assert.equal(d.overdue_students, 1);
+  const finalPay = enrollment.payments.find(p => p.stage === 'Final');
+  // due today is NOT overdue
+  r = await M.patch(`/api/payments/${finalPay.id}`, { date: '2026-10-15' });
+  assert.equal(r.status, 200);
+  d = (await M.get('/api/dashboard')).data.metrics;
+  assert.equal(d.overdue_fees, 0); assert.equal(d.overdue_students, 0); assert.equal(d.pending_fees, 600);
+  // amount changes must go through fee plan
+  assert.equal((await M.patch(`/api/payments/${finalPay.id}`, { amount: 1 })).status, 400);
+  assert.equal((await M.put(`/api/enrollments/${enrollment.id}/fee-plan`, { total_fee: 1100, advance_amount: 400, final_amount: 600, reason: 'x' })).status, 422);
+  // Paid requires method; future received date rejected
+  assert.equal((await M.patch(`/api/payments/${finalPay.id}`, { status: 'Paid', date: '2026-10-15' })).status, 400);
+  assert.equal((await M.patch(`/api/payments/${finalPay.id}`, { status: 'Paid', date: '2026-10-20', method: 'Cash' })).status, 400);
+  r = await M.patch(`/api/payments/${finalPay.id}`, { status: 'Paid', date: '2026-10-15', method: 'Cash', reason: 'Received in office' });
+  assert.equal(r.status, 200);
+  d = (await M.get('/api/dashboard')).data.metrics;
+  assert.equal(d.fees_collected_total, 1000); assert.equal(d.pending_fees, 0);
+  const h = (await M.get(`/api/payments/${finalPay.id}/history`)).data;
+  assert.ok(h.length >= 2); assert.equal(h[0].before.status, 'Pending'); assert.equal(h[0].after.status, 'Paid'); assert.equal(h[0].user_name, 'Anasooya');
+  // reverting Paid needs a reason
+  assert.equal((await M.patch(`/api/payments/${finalPay.id}`, { status: 'Pending' })).status, 400);
+  // sales and teachers can't see payments
+  assert.equal((await S.get('/api/payments')).status, 403);
+  assert.equal((await T1.get('/api/payments')).status, 403);
+  assert.equal((await T1.get(`/api/enrollments/${enrollment.id}`)).data.total_fee, undefined);
+});
+
+let classIds;
+test('Scheduling flags conflicts and capacity; 1:1 allows one student', async () => {
+  // 2026-10-16 is a Friday (weekday 5) inside 10:00–14:00 slot
+  let r = await M.post('/api/classes', { enrollment_id: enrollment.id, start_date: '2026-10-13', time: '10:00', weekdays: [2, 4], count: 3, duration_min: 30 });
+  assert.equal(r.status, 409); assert.equal(r.data.code, 'NEEDS_ACK'); // first date before start date
+  r = await M.post('/api/classes', { enrollment_id: enrollment.id, start_date: '2026-10-13', time: '10:00', weekdays: [2, 4], count: 3, duration_min: 30, acknowledge_warnings: true });
+  assert.equal(r.status, 201, JSON.stringify(r.data)); classIds = r.data.map(c => c.id);
+  assert.match(r.data[0].class_code, /^CL-\d{6}$/);
+  // outside working hours => warning
+  r = await M.post('/api/classes/check', { enrollment_id: enrollment.id, scheduled_at: '2026-10-21T19:00' });
+  assert.ok(r.data.results[0].warnings.some(w => /working hours/.test(w)));
+  // overlapping second 1:1 student for teacherA => hard error
+  const c2 = (await M.post('/api/candidates', { student_name: 'Meera', phone: '9000000001', pretest_teacher_id: teacherA, pretest_at: '2026-10-14T10:00' })).data;
+  await T1.put(`/api/candidates/${c2.id}/result`, { recommended_course: 'Starter', assessment: 'none', admission_status: 'Confirmed' });
+  const s2 = (await M.get(`/api/candidates/${c2.id}`)).data.student_id;
+  const e2 = (await M.post('/api/admissions', { student_id: s2, course: 'Starter', class_mode: '1:1', total_classes: 2, teacher_id: teacherA, start_date: '2026-10-01', total_fee: 500,
+    advance: { amount: 500, status: 'Paid', date: '2026-10-01', method: 'UPI' }, final: { amount: 0, status: 'Pending', date: '2026-11-01' } })).data;
+  r = await M.post('/api/classes', { enrollment_id: e2.id, scheduled_at: '2026-10-13T10:15', duration_min: 30 });
+  assert.equal(r.status, 409); assert.equal(r.data.code, 'SCHEDULE_CONFLICT');
+  // teacherB does not support 3:1
+  assert.equal((await M.patch(`/api/enrollments/${enrollment.id}`, { teacher_id: teacherB })).status, 200); // 1:1 ok
+  assert.equal((await M.patch(`/api/enrollments/${enrollment.id}`, { teacher_id: teacherA })).status, 200);
+  // Teacher B cannot schedule for an enrollment that isn't theirs
+  assert.equal((await T2.post('/api/classes', { enrollment_id: enrollment.id, scheduled_at: '2026-10-22T10:00' })).status, 404);
+});
+
+test('3:1 allows up to three students per concurrent class', async () => {
+  const mk = async (name) => {
+    const c = (await M.post('/api/candidates', { student_name: name, phone: '98' + Math.floor(Math.random() * 1e8), pretest_teacher_id: teacherA })).data;
+    await M.put(`/api/candidates/${c.id}/result`, { recommended_course: 'Writer', assessment: 'ok', admission_status: 'Confirmed' });
+    const sid = (await M.get(`/api/candidates/${c.id}`)).data.student_id;
+    const e = await M.post('/api/admissions', { student_id: sid, course: 'Writer', class_mode: '3:1', total_classes: 5, teacher_id: teacherA, start_date: '2026-10-01', total_fee: 750,
+      advance: { amount: 750, status: 'Paid', date: '2026-10-02', method: 'UPI' }, final: { amount: 0, status: 'Pending', date: '2026-11-02' } });
+    assert.equal(e.status, 201, JSON.stringify(e.data));
+    return e.data.id;
+  };
+  const es = [await mk('G1'), await mk('G2'), await mk('G3'), await mk('G4')];
+  for (const id of es.slice(0, 3)) {
+    const r = await M.post('/api/classes', { enrollment_id: id, scheduled_at: '2026-10-20T11:00', duration_min: 40 });
+    assert.equal(r.status, 201, JSON.stringify(r.data));
+  }
+  const r = await M.post('/api/classes', { enrollment_id: es[3], scheduled_at: '2026-10-20T11:00', duration_min: 40 });
+  assert.equal(r.status, 409); assert.match(r.data.results[0].errors[0], /already has 3 students/);
+  const w = (await M.get('/api/reports?month=2026-10')).data.teacher_workload.find(t => t.id === teacherA);
+  assert.ok(w.planned_sessions >= 4); // group counted once
+});
+
+test('Class completion increments once; repeats do not double-count; cancelled does not count', async () => {
+  const [c1, c2, c3] = classIds;
+  // Teacher records activity
+  let r = await T1.patch(`/api/classes/${c1}`, { status: 'Completed', attendance: 'Present', topics: 'Vowels', homework: 'Page 2', next_class_date: '2026-10-15' });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.equal(r.data.completed_classes, 1); assert.equal(r.data.remaining_classes, 3);
+  // duplicate submission
+  r = await T1.patch(`/api/classes/${c1}`, { status: 'Completed', attendance: 'Present', topics: 'Vowels (edited)' });
+  assert.equal(r.data.completed_classes, 1);
+  await Promise.all([1, 2, 3].map(() => T1.patch(`/api/classes/${c1}`, { status: 'Completed', attendance: 'Present' })));
+  assert.equal(db.prepare('SELECT completed_classes FROM enrollments WHERE id = ?').get(enrollment.id).completed_classes, 1);
+  // Completed requires Present/Late
+  assert.equal((await T1.patch(`/api/classes/${c2}`, { status: 'Completed', attendance: 'Absent' })).status, 400);
+  // future class can't be completed (c3 is 2026-10-20)
+  assert.equal((await T1.patch(`/api/classes/${c3}`, { status: 'Completed', attendance: 'Present' })).status, 400);
+  r = await T1.patch(`/api/classes/${c2}`, { status: 'Cancelled', notes: 'Parent travelling' });
+  assert.equal(r.data.completed_classes, 1);
+  // teacher can't un-complete; manager can, and the count goes back exactly once
+  assert.equal((await T1.patch(`/api/classes/${c1}`, { status: 'Scheduled' })).status, 400);
+  r = await M.patch(`/api/classes/${c1}`, { status: 'Scheduled', reason: 'Entered on wrong class' });
+  assert.equal(r.data.completed_classes, 0);
+  r = await M.patch(`/api/classes/${c1}`, { status: 'Completed', attendance: 'Late' });
+  assert.equal(r.data.completed_classes, 1);
+  // other teacher can't touch it
+  assert.equal((await T2.patch(`/api/classes/${c1}`, { notes: 'x' })).status, 404);
+});
+
+test('Class Activity Student filter works (plus teacher/date/status)', async () => {
+  const mine = (await M.get(`/api/classes?student=${studentId}`)).data;
+  assert.ok(mine.length >= 3);
+  assert.ok(mine.every(c => c.student_id === studentId));
+  const other = (await M.get('/api/classes')).data.filter(c => c.student_id !== studentId);
+  assert.ok(other.length > 0);
+  assert.ok((await M.get(`/api/classes?student=${studentId}&status=Completed`)).data.every(c => c.status === 'Completed' && c.student_id === studentId));
+  assert.equal((await M.get(`/api/classes?student=${studentId}&date=2026-10-13`)).data.length, 1);
+  assert.equal((await T2.get('/api/classes')).data.length, 0);
+});
+
+test('Dashboard and report totals reconcile to records', async () => {
+  const d = (await M.get('/api/dashboard')).data.metrics;
+  const rep = (await M.get('/api/reports?month=2026-10')).data;
+  const paidRows = (await M.get('/api/payments?status=Paid')).data;
+  const pendRows = (await M.get('/api/payments?status=Pending')).data;
+  assert.equal(d.fees_collected_total, paidRows.totals.paid);
+  assert.equal(d.pending_fees, pendRows.totals.pending);
+  assert.equal(rep.totals.pending_total, pendRows.totals.pending);
+  assert.equal(d.total_students, (await M.get('/api/students')).data.length);
+  assert.equal(d.active_enrollments, (await M.get('/api/enrollments?status=Active')).data.length);
+  assert.equal(rep.payment_followup.length, pendRows.rows.length);
+  const completed = db.prepare('SELECT COUNT(*) n FROM classes WHERE counted = 1').get().n;
+  assert.equal(rep.delivery_trend.at(-1).completed, completed);
+  assert.equal(db.prepare('SELECT SUM(completed_classes) n FROM enrollments').get().n, completed);
+  const sam = rep.by_sales_rep.find(r => r.name === 'Sam Sales');
+  assert.equal(sam.admissions, 1);
+  const mgr = rep.by_sales_rep.find(r => r.name === 'Anasooya');
+  assert.equal(sam.admissions + mgr.admissions, rep.totals.admissions_in_month);
+  assert.equal(rep.by_sales_rep.reduce((s, r) => s + r.collected_in_month, 0), rep.totals.collected_in_month);
+  // sales/teacher dashboards are limited
+  assert.equal((await S.get('/api/reports')).status, 403);
+  assert.equal((await S.get('/api/dashboard')).data.metrics.fees_collected_total, undefined);
+  assert.equal((await T1.get('/api/dashboard')).data.role, 'teacher');
+});
+
+test('Deactivating a teacher requires confirmation when work is assigned and blocks their login', async () => {
+  let r = await M.patch(`/api/teachers/${teacherB}`, { active: false });
+  assert.equal(r.status, 200); // teacherB has no active work
+  const t = client();
+  const res = await fetch(base + '/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'nm-app' }, body: JSON.stringify({ email: 't2@x.in', password: pw }) });
+  assert.equal(res.status, 401);
+  assert.equal((await T2.get('/api/dashboard')).status, 401);
+  r = await M.patch(`/api/teachers/${teacherA}`, { active: false });
+  assert.equal(r.status, 400); assert.equal(r.data.code, 'NEEDS_CONFIRM');
+  assert.equal((await M.patch(`/api/teachers/${teacherB}`, { active: true })).status, 200);
+  void t;
+});

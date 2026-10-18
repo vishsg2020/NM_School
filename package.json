@@ -1,0 +1,22 @@
+{
+  "name": "nalla-malayalam-school",
+  "version": "1.0.0",
+  "description": "Nalla Malayalam online school management system",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js",
+    "seed:demo": "node scripts/seed-demo.js ./data/demo.db",
+    "backup": "node scripts/backup.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^13.0.3",
+    "cookie-parser": "^1.4.7",
+    "express": "^5.3.0"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  }
+}
