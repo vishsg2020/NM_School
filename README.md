@@ -31,20 +31,20 @@ You don't need to create tables. The first production deploy runs the migrations
 
 1. **Push this folder to a new private GitHub repository.** Don't commit `data/`, `.env` or any `*.db` file; `.gitignore` excludes them.
 2. In Netlify: **Add new project → Import an existing project →** pick the repository. Leave the build settings alone; they come from `netlify.toml`:
-   - Production deploys run `npm test && npm run migrate`. That's the 14 acceptance tests, then any new database migrations. A failure stops the deploy, so the live site never runs against the wrong database schema.
+   - Production deploys and branch deploys (such as `stage`) run `npm test && npm run migrate`. That's the 14 acceptance tests, then any new database migrations. A failure stops the deploy, so the live site never runs against the wrong database schema.
    - Publish directory `public`; functions in `netlify/functions`.
 3. **Before the first deploy**, add these under *Project configuration → Environment variables*:
 
    | Variable | Value | Scopes |
    |---|---|---|
-   | `DATABASE_URL` | the Supabase transaction-pooler URI from step 1.2 | Builds **and** Functions |
+   | `DATABASE_URL` | the Supabase transaction-pooler URI from step 1.2 | Builds **and** Functions, in every deploy context you use (Production, Branch deploys) |
    | `INITIAL_MANAGER_EMAIL` | the first Manager's email | Functions |
    | `INITIAL_MANAGER_PASSWORD` | a strong temporary password (8+ characters) | Functions |
    | `INITIAL_MANAGER_NAME` | the Manager's name (optional) | Functions |
 
    - Mark `DATABASE_URL` and `INITIAL_MANAGER_PASSWORD` as **secret**.
    - **Don't set `NODE_ENV=production`.** It makes Netlify skip the packages the test step needs. The app detects Netlify itself and uses HTTPS-only cookies.
-4. **Deploy.** The build log should end with `Applied 0001_init.sql`, `Applied 0002_lock_down_data_api.sql`.
+4. **Deploy.** If something is misconfigured, the sign-in page shows the reason (for example a missing `DATABASE_URL` or tables not created) instead of an error code. The build log should end with `Applied 0001_init.sql`, `Applied 0002_lock_down_data_api.sql`.
 5. Open the site and sign in as the Manager. Change the password (**Change password** in the sidebar). Then **delete `INITIAL_MANAGER_PASSWORD`** from Netlify; it's only used while the database has no users.
 6. As the Manager, add teachers (**Teachers**), then logins for teachers and the Sales Team (**Users**).
 
