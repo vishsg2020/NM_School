@@ -50,9 +50,9 @@ const ROUTES = {
 function renderLogin(message) {
   document.title = 'Sign in · Nalla Malayalam';
   app.innerHTML = html`<div class="login-wrap">
-    <div class="login-art" aria-hidden="true">
-      <div class="big">ന</div>
-      <h1>Nalla Malayalam</h1>
+    <div class="login-art">
+      <img class="login-logo" src="img/logo-white.png" alt="" width="640" height="784">
+      <h1 class="sr-only">Nalla Malayalam</h1>
       <p>Pre-tests, admissions, classes and fees for the online school, in one place.</p>
     </div>
     <main class="login-form">
@@ -84,11 +84,12 @@ function renderShell() {
   }).join('');
   app.innerHTML = `
     <div class="topbar"><button type="button" id="menu-btn" aria-expanded="false" aria-controls="side">Menu</button>
-      <span class="brand-mark" aria-hidden="true">ന</span><strong>Nalla Malayalam</strong></div>
+      <img class="brand-mark" src="img/mark-green.png" alt="" width="160" height="164"><strong>Nalla Malayalam</strong></div>
     <div class="shell">
       <nav class="side" id="side" aria-label="Main">
-        <a class="brand" href="#/dashboard"><span class="brand-mark" aria-hidden="true">ന</span>
-          <span class="brand-name">Nalla Malayalam<span>School operations</span></span></a>
+        <a class="brand" href="#/dashboard" aria-label="Nalla Malayalam, go to dashboard">
+          <img class="brand-logo" src="img/logo-green.png" alt="" width="480" height="588">
+          <span class="brand-sub">School operations</span></a>
         <ul class="nav">${nav}</ul>
         <div class="side-foot">
           <div class="who">${esc(me.name)}</div><div class="role">${esc(roleName(me.role))}</div>
