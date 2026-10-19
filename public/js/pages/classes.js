@@ -5,20 +5,31 @@ import {
 
 const STATUSES = ['Scheduled', 'Completed', 'Cancelled', 'Student Absent', 'Teacher Absent', 'Rescheduled'];
 const KEYS = ['q', 'student', 'teacher', 'status', 'date', 'date_from', 'date_to'];
+const VIEW_KEY = 'nm.classes.view';
+const savedView = () => { try { return localStorage.getItem(VIEW_KEY); } catch { return null; } };
+const saveView = v => { try { localStorage.setItem(VIEW_KEY, v); } catch { /* private mode */ } };
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
 export async function renderActivity(page, { query }) {
   const f = Object.fromEntries(KEYS.map(k => [k, query[k] || '']));
   const isMgr = can('manager');
+  const view = (query.view || savedView() || 'list') === 'month' ? 'month' : 'list';
+  saveView(view);
+  const month = /^\d{4}-\d{2}$/.test(query.month || '') ? query.month : (f.date || todayLocal()).slice(0, 7);
   const students = await get('/api/students');
   page.innerHTML = html`<div class="page-head"><div><h1>Class Activity</h1>
-    <div class="sub">Record attendance, topics, homework and progress. Completing a class counts it once against the package.</div></div></div>
+    <div class="sub">Record attendance, topics, homework and progress. Completing a class counts it once against the package.</div></div>
+    <div class="actions"><div class="seg" role="radiogroup" aria-label="View">
+      <label><input type="radio" name="view" value="list" ${view === 'list' ? 'checked' : ''}><span>List</span></label>
+      <label><input type="radio" name="view" value="month" ${view === 'month' ? 'checked' : ''}><span>Month</span></label>
+    </div></div></div>
     <form class="filters" id="cf" role="search" aria-label="Filter classes">
       <div class="field"><label for="c-student">Student</label><select id="c-student" name="student">${raw(options(students.map(s => [s.id, s.student_name + ' (' + s.lead_id + ')']), f.student, 'All students'))}</select></div>
       ${raw(isMgr ? `<div class="field"><label for="c-teacher">Teacher</label><select id="c-teacher" name="teacher">${opt('', 'All teachers', f.teacher)}${teacherOptions(f.teacher, { activeOnly: false, blank: null })}</select></div>` : '')}
       <div class="field"><label for="c-status">Status</label><select id="c-status" name="status">${raw(opt('', 'All statuses', f.status) + opt('needs_update', 'Past, not yet updated', f.status) + options(STATUSES, f.status))}</select></div>
-      <div class="field"><label for="c-date">Date</label><input id="c-date" name="date" type="date" value="${f.date}"></div>
+      ${raw(view === 'list' ? html`<div class="field"><label for="c-date">Date</label><input id="c-date" name="date" type="date" value="${f.date}"></div>
       <div class="field"><label for="c-from">From</label><input id="c-from" name="date_from" type="date" value="${f.date_from}"></div>
-      <div class="field"><label for="c-to">To</label><input id="c-to" name="date_to" type="date" value="${f.date_to}"></div>
+      <div class="field"><label for="c-to">To</label><input id="c-to" name="date_to" type="date" value="${f.date_to}"></div>` : '')}
       <div class="field grow"><label for="c-q">Search</label><input id="c-q" name="q" type="search" value="${f.q}" placeholder="Class ID, student, Lead ID"></div>
       <button class="btn" type="button" id="c-clear">Clear filters</button>
     </form>
@@ -26,8 +37,25 @@ export async function renderActivity(page, { query }) {
     <div id="c-list">${raw(stateBox('loading'))}</div>`;
   const form = page.querySelector('#cf'); const list = page.querySelector('#c-list');
   let rows = []; let seq = 0;
+  page.querySelectorAll('[name=view]').forEach(r => r.addEventListener('change', () => {
+    saveView(r.value);
+    const d = Object.fromEntries(new FormData(form));
+    const keep = Object.entries(d).filter(([k, v]) => v && !['date', 'date_from', 'date_to'].includes(k));
+    location.hash = '#/classes?' + new URLSearchParams([...keep, ['view', r.value], ...(r.value === 'month' ? [['month', month]] : [])]);
+  }));
+  if (view === 'month') {
+    const loadMonth = () => monthView(page, list, form, month, isMgr);
+    form.addEventListener('input', () => loadMonth());
+    form.addEventListener('submit', e => { e.preventDefault(); loadMonth(); });
+    page.querySelector('#c-clear').addEventListener('click', () => { form.querySelectorAll('input,select').forEach(x => { x.value = ''; }); loadMonth(); });
+    list.addEventListener('click', e => {
+      const b = e.target.closest('[data-open]'); if (b) activityForm(b.dataset.open, loadMonth);
+    });
+    await loadMonth();
+    return;
+  }
   async function load() {
-    const d = Object.fromEntries(new FormData(form)); setQuery(d);
+    const d = Object.fromEntries(new FormData(form)); setQuery({ ...d, view: 'list' });
     const my = ++seq;
     try {
       rows = await get('/api/classes?' + new URLSearchParams(Object.entries(d).filter(([, v]) => v)));
@@ -53,6 +81,57 @@ export async function renderActivity(page, { query }) {
   list.addEventListener('click', e => { const b = e.target.closest('[data-open]'); if (b) activityForm(b.dataset.open, load); });
   await load();
   if (query.open) activityForm(query.open, load);
+}
+
+/** Month grid (Mon–Sun) of classes, plus pre-tests when no student/status filter is set. */
+async function monthView(page, list, form, month, isMgr) {
+  const d = Object.fromEntries(new FormData(form));
+  setQuery({ ...d, view: 'month', month });
+  const first = `${month}-01`;
+  const lead = (new Date(first + 'T00:00:00Z').getUTCDay() + 6) % 7; // days before the 1st back to Monday
+  const gridStart = addDays(first, -lead);
+  const [y, m] = month.split('-').map(Number);
+  const last = addDays(`${m === 12 ? y + 1 : y}-${String(m === 12 ? 1 : m + 1).padStart(2, '0')}-01`, -1);
+  const tail = (7 - ((lead + Number(last.slice(8))) % 7)) % 7;
+  const gridEnd = addDays(last, tail);
+  const prev = addDays(first, -1).slice(0, 7); const next = addDays(last, 1).slice(0, 7);
+  list.innerHTML = stateBox('loading');
+  const qs = new URLSearchParams(Object.entries({ ...d, date_from: gridStart, date_to: gridEnd, order: 'asc' }).filter(([, v]) => v));
+  const [classes, pretests] = await Promise.all([
+    get('/api/classes?' + qs),
+    d.student || d.status ? Promise.resolve([]) : get(`/api/candidates?date_from=${gridStart}&date_to=${gridEnd}${isMgr && d.teacher ? '&teacher=' + d.teacher : ''}`).catch(() => []),
+  ]);
+  page.querySelector('#c-count').textContent = `${classes.filter(c => c.scheduled_at.startsWith(month)).length} classes in ${MONTHS[m - 1]} ${y}`;
+  const today = todayLocal();
+  const byDay = new Map();
+  const add = (day, ev) => { if (!byDay.has(day)) byDay.set(day, []); byDay.get(day).push(ev); };
+  for (const c of classes) {
+    const late = c.status === 'Scheduled' && c.scheduled_at.slice(0, 10) < today;
+    const cls = c.status === 'Completed' ? 'done' : ['Cancelled', 'Student Absent', 'Teacher Absent', 'Rescheduled'].includes(c.status) ? 'cancel' : late ? 'late' : 'sched';
+    add(c.scheduled_at.slice(0, 10), { at: c.scheduled_at, html: `<button type="button" class="mev ${cls}" data-open="${c.id}" title="${esc(`${c.class_code} · ${c.student_name} · ${c.status}${isMgr ? ' · ' + c.teacher_name : ''}`)}">${esc(fmtTime(c.scheduled_at.slice(11)))} ${esc(c.student_name.split(' ')[0])}${isMgr && !d.teacher ? ' · ' + esc(c.teacher_name.replace(/^Demo Teacher /, '').split(' ')[0]) : ''}${late ? ' · not updated' : ''}</button>` });
+  }
+  for (const p of pretests) {
+    if (!p.pretest_at || p.status === 'Cancelled') continue;
+    add(p.pretest_at.slice(0, 10), { at: p.pretest_at, html: `<a class="mev pre" href="#/candidate/${p.id}">${esc(fmtTime(p.pretest_at.slice(11)))} Pre-test ${esc(p.student_name.split(' ')[0])}</a>` });
+  }
+  const MAX = 3;
+  let cells = '';
+  for (let day = gridStart; day <= gridEnd; day = addDays(day, 1)) {
+    const evs = (byDay.get(day) || []).sort((a, b) => a.at.localeCompare(b.at));
+    const out = !day.startsWith(month);
+    cells += `<div class="mday ${out ? 'out' : ''} ${day === today ? 'today' : ''}" aria-label="${esc(fmtDate(day))}"><div class="mnum">${Number(day.slice(8))}</div>
+      ${evs.slice(0, MAX).map(e => e.html).join('')}
+      ${evs.length ? `<a class="mcount" href="#/classes?view=list&date=${day}${d.teacher ? '&teacher=' + d.teacher : ''}" aria-label="${evs.length} on ${esc(fmtDate(day))}">${evs.length}</a>` : ''}
+      ${evs.length > MAX ? `<a class="mmore" href="#/classes?view=list&date=${day}${d.teacher ? '&teacher=' + d.teacher : ''}">+${evs.length - MAX} more</a>` : ''}</div>`;
+  }
+  list.innerHTML = `<div class="mhead"><a class="btn small" href="#/classes?view=month&month=${prev}" aria-label="Previous month">‹</a>
+      <h2>${MONTHS[m - 1]} ${y}</h2><a class="btn small" href="#/classes?view=month&month=${next}" aria-label="Next month">›</a>
+      <a class="btn small" href="#/classes?view=month&month=${today.slice(0, 7)}">Today</a></div>
+    <div class="month-grid">${['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(w => `<div class="mdn">${w}</div>`).join('')}${cells}</div>
+    <div class="mlegend"><span><i class="sched"></i>Scheduled</span><span><i class="done"></i>Completed</span><span><i class="late"></i>Past, not updated</span><span><i class="cancel"></i>Cancelled / absent</span><span><i class="pre"></i>Pre-test</span></div>`;
+  // keep current filters on the month arrows
+  const extra = Object.entries(d).filter(([, v]) => v).map(([k, v]) => `&${k}=${encodeURIComponent(v)}`).join('');
+  list.querySelectorAll('.mhead a').forEach(a => { a.href += extra; });
 }
 
 export async function activityForm(id, after) {
