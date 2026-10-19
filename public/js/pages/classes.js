@@ -1,6 +1,6 @@
 import {
   state, api, get, esc, html, raw, pill, fmtDate, fmtTime, fmtDT, table, drawer, onSubmit, options, opt, teacherOptions,
-  setQuery, can, toast, todayLocal, addDays, stateBox, ApiError, WEEKDAYS,
+  setQuery, can, toast, todayLocal, addDays, stateBox, ApiError, WEEKDAYS, starInput, wireStars, starsText, feedbackUrl, copyText,
 } from '../core.js';
 
 const STATUSES = ['Scheduled', 'Completed', 'Cancelled', 'Student Absent', 'Teacher Absent', 'Rescheduled'];
@@ -67,7 +67,8 @@ export async function renderActivity(page, { query }) {
         { label: 'When', cell: r => `<span class="nowrap">${esc(fmtDate(r.scheduled_at))}</span><span class="sub">${esc(fmtTime(r.scheduled_at.slice(11)))} · ${r.duration_min} min</span>` },
         { label: 'Student', cell: r => `${isMgr ? `<a href="#/student/${r.student_id}">${esc(r.student_name)}</a>` : esc(r.student_name)}<span class="sub">${esc(r.course)} · ${esc(r.format)}</span>` },
         ...(isMgr ? [{ label: 'Teacher', cell: r => esc(r.teacher_name) }] : []),
-        { label: 'Status', cell: r => pill(r.status).__raw + (r.attendance ? ' ' + pill(r.attendance).__raw : '') },
+        { label: 'Status', cell: r => pill(r.status).__raw + (r.attendance ? ' ' + pill(r.attendance).__raw : '')
+          + (r.feedback_rating ? `<span class="sub">Parent ${starsText(r.feedback_rating)}</span>` : r.feedback_token && !r.feedback_at ? '<span class="sub">Feedback link sent</span>' : '') },
         { label: 'Topics', cell: r => esc(r.topics || '—') },
         { label: 'Remaining', cls: 'num', cell: r => `${r.remaining_classes} <span class="sub">of ${r.total_classes}</span>` },
         { label: 'Actions', cls: 'cell-actions', cell: r => `<button class="btn small ${r.status === 'Scheduled' ? 'primary' : ''}" type="button" data-open="${r.id}">${r.status === 'Scheduled' ? 'Record' : 'View'}</button>` },
@@ -162,6 +163,15 @@ export async function activityForm(id, after) {
         <div class="field"><label for="a-next">Next class date</label><input id="a-next" name="next_class_date" type="date" value="${c.next_class_date}"></div>
       </div>
       <div class="field"><label for="a-notes">Notes</label><textarea id="a-notes" name="notes">${c.notes}</textarea></div>
+      <fieldset id="rate-box"><legend>Student in this class</legend>
+        ${raw(starInput('rating_participation', 'Participation', c.rating_participation))}
+        ${raw(starInput('rating_homework', 'Homework done', c.rating_homework))}
+        ${raw(starInput('rating_progress', 'Progress today', c.rating_progress))}
+        <div class="field"><label for="a-pnote">Note for parent <span class="muted small">(shown on their feedback page)</span></label><input id="a-pnote" name="parent_note" maxlength="500" value="${c.parent_note}" placeholder="e.g. Great improvement in reading speed!"></div>
+      </fieldset>
+      ${raw(c.status === 'Completed' ? `<div class="fb-box" id="fb-box">${c.feedback_at
+        ? (c.feedback_rating ? `<div class="q">Parent feedback · ${esc(new Date(c.feedback_at).toLocaleDateString('en-IN'))}</div>${starsText(c.feedback_rating)}${c.feedback_tags ? ` · ${esc(c.feedback_tags)}` : ''}${c.feedback_comment ? `<div>“${esc(c.feedback_comment)}”</div>` : ''}` : '<div class="q">Parent feedback received.</div>')
+        : `<div class="row"><span>${c.feedback_token ? 'Feedback link created, not answered yet.' : 'Ask the parent how the class went.'}</span><span class="spacer"></span><button class="btn small" type="button" id="fb-link">Copy feedback link for parent</button></div>`}</div>` : '')}
       ${raw(c.status === 'Scheduled' ? html`<fieldset><legend>Move this class</legend>
         <div class="grid3">
           <div class="field"><label for="a-d">Date</label><input id="a-d" name="new_date" type="date" value="${c.scheduled_at.slice(0, 10)}"></div>
@@ -175,13 +185,26 @@ export async function activityForm(id, after) {
     onMount: (d, close) => {
       const form = d.querySelector('#act-form');
       const st = form.querySelector('#a-st'); const att = form.querySelector('#a-att');
+      wireStars(form);
+      const rateBox = form.querySelector('#rate-box');
+      const syncRate = () => rateBox.classList.toggle('hidden', !['Completed'].includes(st.value) && !c.rating_participation);
+      st.addEventListener('change', syncRate); syncRate();
+      d.querySelector('#fb-link')?.addEventListener('click', async ev => {
+        try {
+          const r = await api('POST', `/api/classes/${c.id}/feedback-link`);
+          const first = c.student_name.split(' ')[0];
+          await copyText(`Hi! How was ${first}'s Malayalam class on ${fmtDT(c.scheduled_at)}? Please rate it here (takes 10 seconds): ${feedbackUrl(r.token)}`, 'Feedback message copied — paste it in WhatsApp');
+          ev.target.textContent = 'Copy again';
+        } catch (e) { toast(e.message, 'error'); }
+      });
       st.addEventListener('change', () => {
         if (st.value === 'Completed' && !att.value) att.value = 'Present';
         if (st.value === 'Student Absent') att.value = 'Absent';
       });
       let ack = false;
       onSubmit(form, async v => {
-        const body = { attendance: v.attendance || null, topics: v.topics, homework: v.homework, progress: v.progress, notes: v.notes, next_class_date: v.next_class_date, reason: v.reason };
+        const body = { attendance: v.attendance || null, topics: v.topics, homework: v.homework, progress: v.progress, notes: v.notes, next_class_date: v.next_class_date, reason: v.reason,
+          rating_participation: v.rating_participation ?? null, rating_homework: v.rating_homework ?? null, rating_progress: v.rating_progress ?? null, parent_note: v.parent_note };
         if (!lockedStatus) body.status = v.status;
         if (v.new_date && (`${v.new_date}T${v.new_time}` !== c.scheduled_at || Number(v.duration_min) !== c.duration_min)) {
           if (v.status !== 'Scheduled') throw new Error('Move the class or change its status, not both at once');
@@ -194,6 +217,7 @@ export async function activityForm(id, after) {
           close();
           toast(r.status === 'Completed' && c.status !== 'Completed' ? `Class completed · ${r.remaining_classes} remaining` : 'Class saved');
           after && after();
+          if (r.status === 'Completed' && c.status !== 'Completed') offerFeedback(r);
         } catch (e) {
           if (e instanceof ApiError && e.data.code === 'NEEDS_ACK') {
             ack = true;
@@ -204,6 +228,26 @@ export async function activityForm(id, after) {
         }
       });
     },
+  });
+}
+
+/** Right after a class is completed: offer the parent's feedback link. */
+function offerFeedback(c) {
+  drawer({
+    title: 'Class completed',
+    body: `<p><strong>${esc(c.student_name)}</strong> · ${esc(fmtDT(c.scheduled_at))}</p>
+      <p>${c.remaining_classes} class${c.remaining_classes === 1 ? '' : 'es'} remaining in the package.</p>
+      <div class="fb-box"><p>Send the parent a quick rating link (no login, about 10 seconds). Copy the message and paste it into WhatsApp.</p>
+      <button class="btn primary" type="button" id="fb-copy">Copy feedback message</button></div>
+      ${c.remaining_classes === 0 ? '<p class="notice info">This was the last class. You can now send the course feedback link and write the end-of-course report on the student profile.</p>' : ''}`,
+    foot: '<button class="btn" type="button" data-close>Done</button>',
+    onMount: d => d.querySelector('#fb-copy').addEventListener('click', async ev => {
+      try {
+        const r = await api('POST', `/api/classes/${c.id}/feedback-link`);
+        await copyText(`Hi! How was ${c.student_name.split(' ')[0]}'s Malayalam class on ${fmtDT(c.scheduled_at)}? Please rate it here (takes 10 seconds): ${feedbackUrl(r.token)}`, 'Feedback message copied — paste it in WhatsApp');
+        ev.target.textContent = 'Copy again';
+      } catch (e) { toast(e.message, 'error'); }
+    }),
   });
 }
 

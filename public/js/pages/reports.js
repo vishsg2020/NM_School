@@ -1,4 +1,4 @@
-import { get, esc, html, raw, pill, inr, fmtDate, fmtMonth, table, todayLocal } from '../core.js';
+import { get, esc, html, raw, pill, inr, fmtDate, fmtMonth, table, todayLocal, starsText, drawer, stateBox, fmtStamp, fmtDT } from '../core.js';
 
 /** Small accessible bar chart (SVG, no inline styles). series: [{key,label,alt}] */
 function barChart(rows, series, { money = false } = {}) {
@@ -39,6 +39,17 @@ export async function render(page, { query }) {
       <section class="panel"><h2>Admissions trend</h2>${raw(barChart(r.admissions_trend, [{ key: 'candidates_added', label: 'Candidates added' }, { key: 'admissions', label: 'Admissions', alt: true }]))}</section>
       <section class="panel"><h2>Class delivery</h2>${raw(barChart(r.delivery_trend, [{ key: 'completed', label: 'Completed classes' }, { key: 'cancelled', label: 'Cancelled or absent', alt: true }]))}</section>
     </div>
+    <p></p>
+    <section class="panel"><h2>Feedback from parents</h2>
+      <p class="small muted">Class ratings come from the after-class links; course ratings and “recommend” (NPS: % 9–10 minus % 0–6) from the end-of-course form. Click a teacher to read comments.</p>
+      ${raw(table([
+        { label: 'Teacher', cell: t => `<button class="linkbtn" type="button" data-fb-teacher="${t.teacher_id}">${esc(t.name)}</button>` },
+        { label: 'Class rating', cls: 'num', cell: t => (t.class_rating ? `${starsText(t.class_rating)} ${t.class_rating}` : '—') },
+        { label: 'Responses / links', cls: 'num', cell: t => `${t.class_responses} / ${t.class_links}` },
+        { label: 'Course rating', cls: 'num', cell: t => (t.course_rating ? `${starsText(t.course_rating)} ${t.course_rating}` : '—') },
+        { label: 'Recommend (NPS)', cls: 'num', cell: t => (t.nps === null ? '—' : (t.nps > 0 ? '+' : '') + t.nps) },
+      ], r.feedback, { empty: 'No feedback this month yet', emptyHint: ' Send the feedback link after a class is completed.' }))}
+    </section>
     <p></p>
     <section class="panel"><h2>Teacher workload and utilisation</h2>
       <p class="small muted">Sessions are teacher time slots: a 3:1 group counts once. Utilisation = planned sessions ÷ monthly capacity.</p>
@@ -95,5 +106,21 @@ export async function render(page, { query }) {
       { label: 'Contact', cell: p => `${esc(p.parent_name || '')}<span class="sub">${esc(p.phone)}</span>` },
       { label: 'Sales rep', cell: p => esc(p.sales_rep_name) },
     ], r.payment_followup, { empty: 'No pending payments' }))}</section>`;
+  page.querySelectorAll('[data-fb-teacher]').forEach(b => b.addEventListener('click', () => feedbackDrawer(b.dataset.fbTeacher, b.textContent, month)));
   page.querySelector('#rep-m').addEventListener('change', e => { if (e.target.value) location.hash = '#/reports?month=' + e.target.value; });
+}
+
+function feedbackDrawer(teacherId, name, month) {
+  drawer({
+    title: `Feedback · ${name} · ${fmtMonth(month)}`,
+    body: `<div id="fb-list">${stateBox('loading')}</div>`,
+    onMount: async d => {
+      const list = await get(`/api/feedback?teacher=${teacherId}&month=${month}`);
+      d.querySelector('#fb-list').innerHTML = list.length ? list.map(f => `<div class="fb-box">
+        <div class="q">${f.kind === 'class' ? `Class ${esc(f.class_code)} · ${esc(fmtDT(f.scheduled_at))}` : `Course feedback · ${esc(f.course)}`} · <a href="#/student/${f.student_id}">${esc(f.student_name)}</a> · ${esc(fmtStamp(f.submitted_at))}</div>
+        ${f.kind === 'class' ? `${starsText(f.rating)}${f.tags ? ' · ' + esc(f.tags) : ''}`
+          : `Teacher ${starsText(f.teacher_rating)} · Course ${starsText(f.content_rating)} · Progress ${starsText(f.progress_rating)} · Recommend ${f.nps}/10${f.continue_choice ? ' · Continue: ' + esc(f.continue_choice) : ''}`}
+        ${f.comment ? `<div>“${esc(f.comment)}”</div>` : ''}</div>`).join('') : stateBox('empty', 'No answers this month');
+    },
+  });
 }

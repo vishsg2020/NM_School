@@ -637,3 +637,87 @@ test('AD-02: student ID, Aadhaar last 4 only, photos, preferred slot with end da
   assert.equal((await S.patch(`/api/students/${c1.student_id}`, { student_code: 'X' })).status, 403);
   void c2;
 });
+
+test('Feedback: teacher rates the student; parent link (no login); weekly/off setting; course feedback and report', async () => {
+  // Two completed classes for one of teacher A's students
+  const en = await db.get(`SELECT * FROM enrollments WHERE teacher_id = ? AND status = 'Active' ORDER BY id LIMIT 1`, [teacherA]);
+  await M.patch(`/api/enrollments/${en.id}`, { total_classes: en.total_classes + 2 });
+  const made = [];
+  for (const at of ['2026-10-05T07:00', '2026-10-06T07:00']) {
+    const k = await M.post('/api/classes', { enrollment_id: en.id, scheduled_at: at, duration_min: 30, acknowledge_warnings: true });
+    assert.equal(k.status, 201, JSON.stringify(k.data));
+    const done = await M.patch(`/api/classes/${k.data[0].id}`, { status: 'Completed', attendance: 'Present' });
+    assert.equal(done.status, 200, JSON.stringify(done.data));
+    made.push({ id: k.data[0].id });
+  }
+  const pair = { enrollment_id: en.id };
+  const [c1, c2] = made;
+  const sched = await db.get(`SELECT id FROM classes WHERE status = 'Scheduled' AND teacher_id = ? LIMIT 1`, [teacherA]);
+
+  // Teacher rates the student and leaves a note for the parent
+  let r = await T1.patch(`/api/classes/${c1.id}`, { rating_participation: 4, rating_homework: 3, rating_progress: 5, parent_note: 'Great reading today' });
+  assert.equal(r.status, 200, JSON.stringify(r.data)); assert.equal(r.data.rating_progress, 5);
+  assert.equal((await T1.patch(`/api/classes/${c1.id}`, { rating_homework: 6 })).status, 400);
+
+  // Links: only for completed classes; Sales cannot; the same link comes back
+  if (sched) assert.equal((await M.post(`/api/classes/${sched.id}/feedback-link`)).status, 400);
+  assert.equal((await S.post(`/api/classes/${c1.id}/feedback-link`)).status, 403);
+  r = await T1.post(`/api/classes/${c1.id}/feedback-link`);
+  assert.equal(r.status, 201); const token = r.data.token; assert.ok(token.length >= 20);
+  assert.equal((await M.post(`/api/classes/${c1.id}/feedback-link`)).data.token, token);
+
+  // Weekly setting: a second link for the same student this week is refused; Off refuses all
+  assert.equal((await S.put('/api/settings/feedback', { frequency: 'weekly' })).status, 403);
+  await M.put('/api/settings/feedback', { frequency: 'weekly' });
+  r = await M.post(`/api/classes/${c2.id}/feedback-link`); assert.equal(r.status, 409); assert.equal(r.data.code, 'WEEKLY_LIMIT');
+  await M.put('/api/settings/feedback', { frequency: 'off' });
+  assert.equal((await M.post(`/api/classes/${c2.id}/feedback-link`)).status, 400);
+  await M.put('/api/settings/feedback', { frequency: 'every' });
+  assert.equal((await M.post(`/api/classes/${c2.id}/feedback-link`)).status, 201);
+
+  // Parent's page: no login, only what it needs
+  const pub = await anon.get(`/api/public/feedback/${token}`);
+  assert.equal(pub.status, 200); assert.equal(pub.data.kind, 'class'); assert.equal(pub.data.state, 'open');
+  assert.equal(pub.data.parent_note, 'Great reading today'); assert.equal(pub.data.phone, undefined); assert.equal(pub.data.lead_id, undefined);
+  assert.equal((await anon.get('/api/public/feedback/not-a-token')).status, 404);
+  assert.equal((await anon.post(`/api/public/feedback/${token}`, {})).status, 400);
+  const mBefore = (await M.get('/api/notifications/count')).data.unread;
+  r = await anon.post(`/api/public/feedback/${token}`, { rating: 2, tags: ['Fun', 'Hacked tag'], comment: 'Teacher joined late' });
+  assert.equal(r.status, 200);
+  assert.equal((await anon.post(`/api/public/feedback/${token}`, { rating: 5 })).status, 400); // once only
+  assert.equal((await anon.get(`/api/public/feedback/${token}`)).data.state, 'submitted');
+  // Low rating notifies the Manager
+  assert.equal((await M.get('/api/notifications/count')).data.unread, mBefore + 1);
+  assert.match((await M.get('/api/notifications')).data.items[0].title, /Low class rating/);
+  // Manager sees the answer; the teacher does not see individual answers
+  const mc = (await M.get(`/api/classes/${c1.id}`)).data;
+  assert.equal(mc.feedback_rating, 2); assert.equal(mc.feedback_tags, 'Fun'); assert.equal(mc.feedback_comment, 'Teacher joined late');
+  const tc = (await T1.get(`/api/classes/${c1.id}`)).data;
+  assert.equal(tc.feedback_rating, undefined); assert.equal(tc.feedback_comment, undefined); assert.ok(tc.feedback_at);
+  assert.equal((await T1.get('/api/feedback')).status, 403);
+
+  // Course: only once all classes are done
+  const e = (await db.get('SELECT * FROM enrollments WHERE id = ?', [pair.enrollment_id]));
+  if (e.completed_classes < e.total_classes) {
+    assert.equal((await M.post(`/api/enrollments/${e.id}/feedback-link`)).status, 400);
+    assert.equal((await T1.put(`/api/enrollments/${e.id}/report`, { final_report: 'x', next_level: 'Writer' })).status, 400);
+    await M.patch(`/api/enrollments/${e.id}`, { total_classes: e.completed_classes });
+  }
+  r = await T1.put(`/api/enrollments/${e.id}/report`, { final_report: 'Reads fluently; keep practising conjuncts.', next_level: 'Writer' });
+  assert.equal(r.status, 200);
+  assert.equal((await T1.put(`/api/enrollments/${e.id}/report`, { final_report: 'x', next_level: 'Astronaut' })).status, 400);
+  r = await T1.post(`/api/enrollments/${e.id}/feedback-link`); assert.equal(r.status, 201);
+  const ct = r.data.token;
+  assert.equal((await anon.post(`/api/public/feedback/${ct}`, { teacher_rating: 5, content_rating: 4 })).status, 400);
+  r = await anon.post(`/api/public/feedback/${ct}`, { teacher_rating: 5, content_rating: 4, progress_rating: 4, nps: 9, continue_choice: 'Yes', comment: 'Lovely teacher' });
+  assert.equal(r.status, 200);
+  const list = (await M.get(`/api/feedback?enrollment=${e.id}`)).data;
+  assert.ok(list.some(f => f.kind === 'course' && f.nps === 9 && f.continue_choice === 'Yes'));
+  // Reports summary for the month
+  const month = list[0].submitted_at.slice(0, 7);
+  const rep = (await M.get(`/api/reports?month=${month}`)).data.feedback.find(t => t.teacher_id === teacherA);
+  assert.equal(rep.class_rating, 2); assert.equal(rep.class_responses, 1); assert.equal(rep.course_rating, 5); assert.equal(rep.nps, 100);
+  // Teacher dashboard shows the teacher's own average
+  const td = (await T1.get('/api/dashboard')).data.metrics;
+  assert.ok('my_rating_month' in td);
+});

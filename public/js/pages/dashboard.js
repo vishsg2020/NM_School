@@ -81,6 +81,7 @@ export async function render(page) {
         metric('Pre-tests awaiting my result', m.assigned_pretests, '#/pretests?result=none', m.assigned_pretests ? 'attention' : ''),
         metric('Active students', m.active_students, '#/students'),
         metric(`Classes completed in ${fmtMonth(d.month)}`, m.completed_month, `#/classes?status=Completed&date_from=${d.month}-01`),
+        metric(`My parent rating in ${fmtMonth(d.month)}`, m.my_rating_month ? `★ ${m.my_rating_month} (${m.my_ratings_month})` : '—', '#/classes?status=Completed'),
       ])}
     </div>
     <div class="cols">

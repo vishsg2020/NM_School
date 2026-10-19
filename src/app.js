@@ -45,6 +45,8 @@ function createApp(db) {
   app.post('/api/logout', async (req, res) => { await auth.logout(req, res); res.json({ ok: true }); });
   app.get('/api/health', async (_req, res) => { await db.get('SELECT 1 AS ok'); res.json({ ok: true }); });
 
+  // Parents' feedback page works without a login (the link's random token is the key).
+  require('./routes/feedback').publicRoutes(app, ctx);
   app.use('/api', requireAuth);
   require('./routes/users')(app, ctx);
   require('./routes/teachers')(app, ctx);
@@ -54,9 +56,11 @@ function createApp(db) {
   require('./routes/reports')(app, ctx);
   require('./routes/settings')(app, ctx);
   require('./routes/notifications')(app, ctx);
+  require('./routes/feedback')(app, ctx);
 
   app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Not found')));
   app.use(express.static(path.join(__dirname, '..', 'public'), { index: 'index.html', maxAge: '1h' }));
+  app.get('/f/:token', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'feedback.html')));
   app.get(/^\/(?!api\/).*/, (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
 
   // eslint-disable-next-line no-unused-vars

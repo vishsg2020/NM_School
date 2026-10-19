@@ -35,6 +35,12 @@
   status = 200
   force = true
 
+# Parents' feedback page (no login).
+[[redirects]]
+  from = "/f/*"
+  to = "/feedback.html"
+  status = 200
+
 # Single-page app: every other path loads the app shell.
 [[redirects]]
   from = "/*"

@@ -133,6 +133,17 @@ consent screen published "In production", a Web OAuth client whose redirect URI 
 **Connect Google account**. Add the redirect URI for every address the app runs on (stage and production).
 Optional: `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` environment variables are used if nothing is saved in Settings.
 
+## Parent feedback
+
+- **After a class:** when a class is marked Completed, the teacher or Manager can copy a WhatsApp-ready message with a
+  rating link (`/f/<code>`, no login, works once, 7 days). Teachers also rate the student (participation, homework,
+  progress) and can leave a note the parent sees. Settings → "Class feedback links": after every class, at most once
+  a week per student, or off.
+- **After the course:** once all classes are done, the student profile offers the course feedback link (teacher,
+  content, progress, 0–10 recommend, continue?) and the teacher's end-of-course report with the next step.
+- The Manager sees answers in Reports (per teacher, with comments) and gets a notification for 1–2★ ratings and every
+  course answer. Teachers see only their own average rating on their dashboard.
+
 ## Backups and restore
 
 - **Weekly:** the GitHub Action above. **On demand:** `DATABASE_URL="<supabase uri>" npm run backup` writes a consistent JSON export of every table to `./backups/` and keeps the newest 30.

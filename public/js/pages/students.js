@@ -1,4 +1,4 @@
-import { api, get, esc, html, raw, pill, inr, fmtDate, fmtDT, fmtTime, table, can, setQuery, options, stateBox, todayLocal, drawer, onSubmit, toast } from '../core.js';
+import { api, get, esc, html, raw, pill, inr, fmtDate, fmtDT, fmtTime, table, can, setQuery, options, stateBox, todayLocal, drawer, onSubmit, toast, starsText, feedbackUrl, copyText, fmtStamp } from '../core.js';
 import { paymentForm, feePlanForm, enrollmentForm } from './admissions.js';
 import { scheduleForm } from './classes.js';
 import { historyList, shrinkImage, guessType, toBase64 } from './pretests.js';
@@ -102,6 +102,7 @@ export async function renderProfile(page, { id }) {
           { label: '', cls: 'cell-actions', cell: p => `<button class="btn small" type="button" data-pay="${p.id}">Update</button>` },
         ], e.payments))}
         <p></p><div class="row"><button class="btn small" type="button" data-act="fee">Edit fee plan</button><button class="btn small" type="button" data-act="hist">Enrollment history</button></div>` : '')}
+      ${raw(endOfCourse(e))}
     </section>`).join('') + html`<section class="panel"><h2>Recent classes</h2>${raw(table([
       { label: 'Class', cell: c => `<a href="#/classes?student=${s.id}&open=${c.id}">${esc(c.class_code)}</a>` },
       { label: 'When', cell: c => esc(fmtDT(c.scheduled_at)) },
@@ -109,6 +110,19 @@ export async function renderProfile(page, { id }) {
       { label: 'Topics', cell: c => esc(c.topics || '—') },
     ], s.classes.slice(0, 12), { empty: 'No classes scheduled yet' }))}</section>`;
 
+  // Manager: show the parent's course feedback on finished enrollments.
+  if (isMgr) {
+    for (const e of s.enrollments.filter(courseDone)) {
+      get(`/api/feedback?enrollment=${e.id}`).then(list => {
+        const fb = list.find(x => x.kind === 'course'); const box = wrap.querySelector(`[data-course-fb="${e.id}"]`);
+        if (!fb || !box) return;
+        box.innerHTML = `<div class="q">Parent's course feedback · ${esc(fmtStamp(fb.submitted_at))}</div>
+          Teacher ${starsText(fb.teacher_rating)} · Course ${starsText(fb.content_rating)} · Progress ${starsText(fb.progress_rating)}<br>
+          Recommend: <b>${fb.nps}/10</b>${fb.continue_choice ? ` · Continue: <b>${esc(fb.continue_choice)}</b>` : ''}${fb.comment ? `<div>“${esc(fb.comment)}”</div>` : ''}`;
+        box.classList.remove('hidden');
+      }).catch(() => {});
+    }
+  }
   wrap.addEventListener('click', ev => {
     const panel = ev.target.closest('[data-enr]'); if (!panel) return;
     const e = s.enrollments.find(x => String(x.id) === panel.dataset.enr);
@@ -118,6 +132,13 @@ export async function renderProfile(page, { id }) {
     if (act === 'edit') enrollmentForm(e, reload);
     if (act === 'fee') feePlanForm(e, reload);
     if (act === 'schedule') scheduleForm({ ...e, student_name: s.student_name }, reload);
+    if (act === 'report') reportForm(e, reload);
+    if (act === 'course-fb') {
+      api('POST', `/api/enrollments/${e.id}/feedback-link`).then(r => {
+        if (r.submitted_at) { toast('The parent has already sent the course feedback'); return; }
+        return copyText(`Hi! ${s.student_name.split(' ')[0]} has completed the ${e.course} course with Nalla Malayalam. Thank you! We'd love your feedback on the course and the teacher: ${feedbackUrl(r.token)}`, 'Course feedback message copied — paste it in WhatsApp');
+      }).catch(err => toast(err.message, 'error'));
+    }
     if (act === 'hist') get(`/api/enrollments/${e.id}`).then(full => drawer({ title: 'Enrollment history', body: historyList(full.history) }));
   });
 }
@@ -166,5 +187,37 @@ function identityForm(s, after) {
         close(); toast('Student details saved'); after();
       });
     },
+  });
+}
+
+const NEXT_LEVELS = ['Starter', 'Reader', 'Writer', 'Malayalam Master', 'Repeat this level', 'Course finished'];
+const courseDone = e => e.status === 'Completed' || e.completed_classes >= e.total_classes;
+
+/** End-of-course block: teacher's report + course feedback link (shown once all classes are done). */
+function endOfCourse(e) {
+  if (!courseDone(e)) return '';
+  return `<div class="eoc"><h3>End of course</h3>
+    ${e.final_report ? `<div class="fb-box"><div class="q">Teacher's report${e.final_report_at ? ' · ' + esc(fmtStamp(e.final_report_at)) : ''}</div>${esc(e.final_report)}<div><b>Recommended next step:</b> ${esc(e.next_level)}</div></div>`
+      : '<p class="muted small">The teacher has not written the end-of-course report yet.</p>'}
+    <div class="fb-box hidden" data-course-fb="${e.id}"></div>
+    <div class="row"><button class="btn small" type="button" data-act="report">${e.final_report ? 'Edit report' : 'Write end-of-course report'}</button>
+      <button class="btn small" type="button" data-act="course-fb">Copy course feedback link</button></div></div>`;
+}
+
+function reportForm(e, after) {
+  drawer({
+    title: 'End-of-course report',
+    body: html`<form id="rep-form" novalidate>
+      <p class="muted">${e.course} · ${e.class_mode} · ${e.completed_classes} of ${e.total_classes} classes completed</p>
+      <div class="field"><label for="r-sum">Summary *</label><textarea id="r-sum" name="final_report" maxlength="4000" placeholder="What the student can now do, strengths, what to keep practising">${e.final_report}</textarea></div>
+      <div class="field"><label for="r-next">Recommended next step *</label><select id="r-next" name="next_level">${raw(options(NEXT_LEVELS, e.next_level, 'Select'))}</select></div>
+    </form>`,
+    foot: '<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" form="rep-form">Save report</button>',
+    onMount: (d, close) => onSubmit(d.querySelector('#rep-form'), async v => {
+      if (!v.final_report.trim()) throw Object.assign(new Error('Write a short summary'), { data: { field: 'Summary' } });
+      if (!v.next_level) throw new Error('Choose the recommended next step');
+      await api('PUT', `/api/enrollments/${e.id}/report`, v);
+      close(); toast('Report saved'); after();
+    }),
   });
 }

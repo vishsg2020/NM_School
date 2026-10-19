@@ -14,13 +14,17 @@ const DEFAULT_DURATION = { '1:1': 30, '3:1': 40 };
 const SELECT = `
   SELECT cl.*, t.name AS teacher_name, e.course, e.student_id, e.total_classes, e.completed_classes,
          (e.total_classes - e.completed_classes) AS remaining_classes, e.status AS enrollment_status,
-         c.student_name, c.lead_id, rb.name AS recorded_by_name
+         c.student_name, c.lead_id, rb.name AS recorded_by_name,
+         fb.token AS feedback_token, fb.submitted_at AS feedback_at, fb.rating AS feedback_rating, fb.tags AS feedback_tags, fb.comment AS feedback_comment
   FROM classes cl
   JOIN teachers t ON t.id = cl.teacher_id
   JOIN enrollments e ON e.id = cl.enrollment_id
   JOIN students s ON s.id = e.student_id
   JOIN candidates c ON c.id = s.candidate_id
-  LEFT JOIN users rb ON rb.id = cl.recorded_by`;
+  LEFT JOIN users rb ON rb.id = cl.recorded_by
+  LEFT JOIN feedback fb ON fb.class_id = cl.id AND fb.kind = 'class'`;
+// Teachers see their average rating (Dashboard) but not each parent's answer.
+const forTeacher = r => { const { feedback_rating, feedback_tags, feedback_comment, ...rest } = r; return rest; };
 
 /**
  * Checks one proposed class. Returns { errors: [], warnings: [] }.
@@ -100,13 +104,14 @@ module.exports = (app, { db }) => {
     if (q.date_to && isValidDate(q.date_to)) { where.push('substr(cl.scheduled_at,1,10) <= @dt'); p.dt = q.date_to; }
     if (q.q) { where.push('(c.student_name ILIKE @q OR cl.class_code ILIKE @q OR c.lead_id ILIKE @q)'); p.q = `%${q.q}%`; }
     const order = q.order === 'asc' ? 'ASC' : 'DESC';
-    res.json(await db.all(`${SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY cl.scheduled_at ${order}, cl.id LIMIT 2000`, p));
+    const rows = await db.all(`${SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY cl.scheduled_at ${order}, cl.id LIMIT 2000`, p);
+    res.json(req.user.role === 'teacher' ? rows.map(forTeacher) : rows);
   });
 
   app.get('/api/classes/:id', requireRole('manager', 'teacher'), async (req, res) => {
     const cl = await getClass(idParam(req.params.id));
     if (!cl || !own(req.user, cl)) throw notFound('Class');
-    res.json({ ...cl, history: await history(db, 'class', cl.id) });
+    res.json({ ...(req.user.role === 'teacher' ? forTeacher(cl) : cl), history: await history(db, 'class', cl.id) });
   });
 
   /** Validates the request and works out the class times. Runs the checks on `h` (pool or transaction). */
@@ -217,6 +222,9 @@ module.exports = (app, { db }) => {
         if (r.warnings.length && !bool(b.acknowledge_warnings)) throw conflict('Please review the scheduling warnings', { code: 'NEEDS_ACK', results: [{ scheduled_at: c.scheduled_at, ...r }], general: [] });
       }
       for (const f of ['topics', 'homework', 'notes', 'progress']) if (b[f] !== undefined) c[f] = str(b[f], { name: f, max: 4000 });
+      // Teacher's quick rating of the student (1–5 stars) and a note shown on the parent's feedback page.
+      for (const f of ['rating_participation', 'rating_homework', 'rating_progress']) if (b[f] !== undefined) c[f] = int(b[f], { min: 1, max: 5, name: 'Rating' });
+      if (b.parent_note !== undefined) c.parent_note = str(b.parent_note, { name: 'Note for parent', max: 500 });
       if (b.next_class_date !== undefined) {
         c.next_class_date = str(b.next_class_date, { name: 'Next class date', max: 10 });
         if (c.next_class_date && !isValidDate(c.next_class_date)) throw bad('Next class date is not valid');
@@ -239,6 +247,7 @@ module.exports = (app, { db }) => {
 
       await t.run(`UPDATE classes SET scheduled_at=@scheduled_at, duration_min=@duration_min, status=@status, attendance=@attendance,
         topics=@topics, homework=@homework, notes=@notes, progress=@progress, next_class_date=@next_class_date,
+        rating_participation=@rating_participation, rating_homework=@rating_homework, rating_progress=@rating_progress, parent_note=@parent_note,
         recorded_by=@recorded_by, recorded_at=@recorded_at, updated_at=now_iso() WHERE id=@id`, c);
       // Exactly-once accounting, guarded by the `counted` flag in the same transaction.
       if (c.status === 'Completed') {
@@ -254,7 +263,8 @@ module.exports = (app, { db }) => {
       }
       await audit(t, req.user, 'class', c.id, before.status !== c.status ? `status_${c.status}` : 'updated', before, c, str(b.reason, { max: 500 }));
     });
-    res.json(await getClass(id));
+    const saved = await getClass(id);
+    res.json(req.user.role === 'teacher' ? forTeacher(saved) : saved);
   });
 
   // Calendar: classes grouped into sessions, plus pre-tests and working hours.

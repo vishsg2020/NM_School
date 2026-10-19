@@ -10,7 +10,7 @@ const path = require('path');
 const { databasePool } = require('../src/db');
 
 const TABLES = ['users', 'teachers', 'teacher_hours', 'teacher_slots', 'candidates', 'pretest_results', 'students',
-  'enrollments', 'payments', 'classes', 'audit_events', 'notifications', 'pretest_files'];
+  'enrollments', 'payments', 'classes', 'audit_events', 'notifications', 'pretest_files', 'feedback'];
 
 (async () => {
   const cs = process.env.DATABASE_URL;

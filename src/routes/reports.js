@@ -80,6 +80,8 @@ module.exports = (app, { db }) => {
         AND NOT EXISTS (SELECT 1 FROM pretest_results r WHERE r.candidate_id = c.id)`,
       active_students: `SELECT COUNT(*) n FROM enrollments WHERE teacher_id=@tid AND status='Active'`,
       completed_month: `SELECT COUNT(*) n FROM classes WHERE teacher_id=@tid AND counted=1 AND substr(scheduled_at,1,7)=@month`,
+      my_rating_month: `SELECT ROUND(AVG(rating)::numeric, 1) n FROM feedback WHERE teacher_id=@tid AND kind='class' AND substr(submitted_at,1,7)=@month`,
+      my_ratings_month: `SELECT COUNT(*) n FROM feedback WHERE teacher_id=@tid AND kind='class' AND rating IS NOT NULL AND substr(submitted_at,1,7)=@month`,
     }, { tid, t, month });
     const today_classes = (await db.all(`SELECT cl.id, cl.class_code, cl.scheduled_at, cl.duration_min, cl.format, cl.status, c.student_name, e.course
       FROM classes cl JOIN enrollments e ON e.id = cl.enrollment_id JOIN students s ON s.id = e.student_id JOIN candidates c ON c.id = s.candidate_id
@@ -166,7 +168,8 @@ module.exports = (app, { db }) => {
       pending_total: `SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Pending'`,
       overdue_total: `SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Pending' AND date < @t`,
     }, { month, t });
-    res.json({ month, today: t, totals, admissions_trend, delivery_trend, teacher_workload, course_mix, payment_followup, remaining_classes, by_sales_rep });
+    const feedback = await require('./feedback').feedbackSummary(db, month);
+    res.json({ month, today: t, totals, feedback, admissions_trend, delivery_trend, teacher_workload, course_mix, payment_followup, remaining_classes, by_sales_rep });
   });
 };
 

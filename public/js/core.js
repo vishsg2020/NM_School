@@ -234,3 +234,20 @@ export async function copyText(text, done = 'Copied') {
   }
   toast(done);
 }
+
+// ---------- Stars ----------
+/** 1–5 star picker (radio buttons). Wire with wireStars(container). */
+export function starInput(name, label, value) {
+  return `<fieldset class="star-field" data-stars><legend>${esc(label)}</legend><div class="stars-row small-stars">${[1, 2, 3, 4, 5].map(n =>
+    `<label class="${value && n <= value ? 'on' : ''}"><input type="radio" name="${name}" value="${n}" ${Number(value) === n ? 'checked' : ''}><span aria-hidden="true">★</span><span class="sr-only">${n} of 5</span></label>`).join('')}</div></fieldset>`;
+}
+export function wireStars(root) {
+  root.querySelectorAll('[data-stars]').forEach(fs => fs.addEventListener('change', () => {
+    const v = Number(fs.querySelector('input:checked')?.value || 0);
+    fs.querySelectorAll('label').forEach((l, i) => l.classList.toggle('on', i < v));
+  }));
+}
+export const starsText = n => (n ? `<span class="stars-ro" aria-label="${n} of 5">${'★'.repeat(Math.round(n))}<span class="off">${'★'.repeat(5 - Math.round(n))}</span></span>` : '—');
+
+/** Copies a feedback link and the WhatsApp-ready message. */
+export function feedbackUrl(token) { return `${location.origin}/f/${token}`; }

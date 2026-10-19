@@ -1,14 +1,14 @@
 import { api, get, esc, html, raw, pill, onSubmit, toast, fmtStamp, confirmBox, copyText } from '../core.js';
 
 export async function render(page, { query }) {
-  const g = await get('/api/settings/google');
+  const [g, fb] = await Promise.all([get('/api/settings/google'), get('/api/settings/feedback')]);
   const account = g.account_email || g.suggested_account;
   const status = g.connected
     ? (g.last_error ? pill('Needs attention', 'red') : pill('Connected', 'green'))
     : pill('Not connected', 'amber');
 
   page.innerHTML = html`<div class="page-head"><div><h1>Settings</h1>
-      <div class="sub">Google account used to create Google Meet links for pre-tests.</div></div></div>
+      <div class="sub">Parent feedback and the Google account used for Meet links.</div></div></div>
     ${raw(query.google === 'connected' ? '<div class="notice info" role="status">Google account connected. New confirmed pre-tests will get a Meet link.</div>' : '')}
     ${raw(query.google === 'error' ? `<div class="notice error" role="alert">Could not connect Google: ${esc(query.msg || 'unknown error')}</div>` : '')}
 
@@ -21,6 +21,16 @@ export async function render(page, { query }) {
         ${raw(g.client_id && g.has_client_secret ? `<button class="btn primary" type="button" id="connect">${g.connected ? 'Reconnect Google account' : 'Connect Google account'}</button>` : '')}
         ${raw(g.connected ? '<button class="btn danger" type="button" id="disconnect">Disconnect</button>' : '')}
       </div>
+    </section>
+
+    <section class="panel"><h2>Parent feedback after classes</h2>
+      <p class="small muted">When a class is completed, staff can copy a rating link for the parent (no login). Course feedback after the last class is always available.</p>
+      <form id="fb-form" class="row" novalidate>
+        <div class="field"><label for="fb-freq">Class feedback links</label><select id="fb-freq" name="frequency">
+          ${raw(['every', 'weekly', 'off'].map(v => `<option value="${v}" ${fb.frequency === v ? 'selected' : ''}>${{ every: 'After every class', weekly: 'At most once a week per student', off: 'Off' }[v]}</option>`).join(''))}
+        </select></div>
+        <button class="btn" type="submit">Save</button>
+      </form>
     </section>
 
     <section class="panel"><h2>One-time setup in Google Cloud</h2>
@@ -58,6 +68,7 @@ export async function render(page, { query }) {
     if (!ok) return;
     await api('DELETE', '/api/settings/google/connection'); toast('Google disconnected'); reload();
   });
+  onSubmit(page.querySelector('#fb-form'), async v => { await api('PUT', '/api/settings/feedback', v); toast('Feedback setting saved'); });
   onSubmit(page.querySelector('#g-form'), async v => {
     await api('PUT', '/api/settings/google', v);
     toast('Google client saved'); reload();
