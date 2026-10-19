@@ -148,12 +148,12 @@ export function scheduleForm(e, after) {
       </fieldset>
       <div class="grid3">
         <div class="field"><label for="s-date">First date</label><input id="s-date" name="start_date" type="date" value="${start}"></div>
-        <div class="field"><label for="s-time">Time (IST)</label><input id="s-time" name="time" type="time" value="17:00"></div>
+        <div class="field"><label for="s-time">Time (IST)</label><input id="s-time" name="time" type="time" value="${e.slot_time || '17:00'}"></div>
         <div class="field"><label for="s-dur">Minutes</label><input id="s-dur" name="duration_min" type="number" min="5" max="240" value="${e.class_mode === '3:1' ? 40 : 30}"></div>
       </div>
       <div id="series-fields">
         <fieldset><legend>Weekdays</legend><div class="row">
-          ${raw(WEEKDAYS.map((w, i) => `<label class="check"><input type="checkbox" name="wd${i}" ${[1, 3, 5].includes(i) ? 'checked' : ''}> ${w}</label>`).join(''))}
+          ${raw(WEEKDAYS.map((w, i) => `<label class="check"><input type="checkbox" name="wd${i}" ${(e.slot_days ? e.slot_days.split(',').map(Number) : [1, 3, 5]).includes(i) ? 'checked' : ''}> ${w}</label>`).join(''))}
         </div><div class="field"></div></fieldset>
         <div class="field"><label for="s-count">Number of classes</label><input id="s-count" name="count" type="number" min="1" max="200" value="${Math.max(1, Math.min(remaining, 12))}"></div>
       </div>

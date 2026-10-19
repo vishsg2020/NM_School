@@ -82,7 +82,7 @@ const day = n => addMinutes(`${today()}T00:00`, n * 1440).slice(0, 10);
     const mode = i === 2 ? '3:1' : '1:1';
     const classes = 30; const fee = classes * (mode === '1:1' ? 250 : 150);
     const e = await call('m', 'POST', '/api/admissions', {
-      student_id: cand.student_id, course: courses[i % 4], class_mode: mode, total_classes: classes, teacher_id: T[i === 1 ? 1 : 0], start_date: day(-10),
+      student_id: cand.student_id, course: courses[i % 4], class_mode: mode, slot_days: [1, 3, 5], slot_time: `${String(12 + i).padStart(2, '0')}:00`, total_classes: classes, teacher_id: T[i === 1 ? 1 : 0], start_date: day(-10),
       total_fee: fee, idempotency_key: 'adm-demo-' + i,
       advance: { amount: fee / 2, status: 'Paid', date: day(-10), method: 'UPI', reference: 'DEMO' + i },
       final: { amount: fee / 2, status: 'Pending', date: day(i === 0 ? -3 : 20) },

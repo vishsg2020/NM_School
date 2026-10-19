@@ -168,7 +168,7 @@ test('Assessment retains Lead ID and Sales Rep; Confirmed creates Student but no
 let enrollment;
 test('Admission: mismatch error only on a genuine mismatch, explained; creates one Enrollment + Advance/Final', async () => {
   const body = {
-    student_id: studentId, course: 'Reader', class_mode: '1:1', total_classes: 4, teacher_id: teacherA, start_date: '2026-10-15',
+    student_id: studentId, course: 'Reader', class_mode: '1:1', slot_days: [2, 4], slot_time: '10:00', total_classes: 4, teacher_id: teacherA, start_date: '2026-10-15',
     total_fee: 1000, idempotency_key: 'adm-1',
     advance: { amount: 400, status: 'Paid', date: '2026-10-14', method: 'UPI', reference: 'UPI123' },
     final: { amount: 500, status: 'Pending', date: '2026-10-10' },
@@ -241,7 +241,7 @@ test('Scheduling flags conflicts and capacity; 1:1 allows one student', async ()
   const c2 = (await M.post('/api/candidates', { age: 25, student_name: 'Meera', phone: '9000000001', pretest_teacher_id: teacherA, pretest_at: '2026-10-14T10:00' })).data;
   await T1.put(`/api/candidates/${c2.id}/result`, { recommended_course: 'Starter', assessment: 'none', admission_status: 'Confirmed' });
   const s2 = (await M.get(`/api/candidates/${c2.id}`)).data.student_id;
-  const e2 = (await M.post('/api/admissions', { student_id: s2, course: 'Starter', class_mode: '1:1', total_classes: 2, teacher_id: teacherA, start_date: '2026-10-01', total_fee: 500,
+  const e2 = (await M.post('/api/admissions', { student_id: s2, course: 'Starter', class_mode: '1:1', slot_days: [3], slot_time: '10:00', total_classes: 2, teacher_id: teacherA, start_date: '2026-10-01', total_fee: 500,
     advance: { amount: 500, status: 'Paid', date: '2026-10-01', method: 'UPI' }, final: { amount: 0, status: 'Pending', date: '2026-11-01' } })).data;
   r = await M.post('/api/classes', { enrollment_id: e2.id, scheduled_at: '2026-10-13T10:15', duration_min: 30 });
   assert.equal(r.status, 409); assert.equal(r.data.code, 'SCHEDULE_CONFLICT');
@@ -257,7 +257,7 @@ test('3:1 allows up to three students per concurrent class', async () => {
     const c = (await M.post('/api/candidates', { age: 25, student_name: name, phone: '98' + Math.floor(Math.random() * 1e8), pretest_teacher_id: teacherA })).data;
     await M.put(`/api/candidates/${c.id}/result`, { recommended_course: 'Writer', assessment: 'ok', admission_status: 'Confirmed' });
     const sid = (await M.get(`/api/candidates/${c.id}`)).data.student_id;
-    const e = await M.post('/api/admissions', { student_id: sid, course: 'Writer', class_mode: '3:1', total_classes: 5, teacher_id: teacherA, start_date: '2026-10-01', total_fee: 750,
+    const e = await M.post('/api/admissions', { student_id: sid, course: 'Writer', class_mode: '3:1', slot_days: [5], slot_time: '10:00', total_classes: 5, teacher_id: teacherA, start_date: '2026-10-01', total_fee: 750,
       advance: { amount: 750, status: 'Paid', date: '2026-10-02', method: 'UPI' }, final: { amount: 0, status: 'Pending', date: '2026-11-02' } });
     assert.equal(e.status, 201, JSON.stringify(e.data));
     return e.data.id;
@@ -566,4 +566,74 @@ test('AS-01: follow-up time, test paper files, and notifications to Manager + Sa
   assert.equal((await T1.del(`/api/files/${fileId}`)).status, 400);
   assert.equal((await M.del(`/api/files/${fileId}`)).status, 200);
   assert.equal((await S.get(`/api/candidates/${cand.id}/files`)).data.length, 4);
+});
+
+
+test('AD-02: student ID, Aadhaar last 4 only, photos, preferred slot with end date and booked-slot warning', async () => {
+  const mk = async (first, key) => {
+    const c = (await S.post('/api/candidates', { first_name: first, last_name: 'Kurup', age: 10, parent_name: 'Rani', parent_relationship: 'Mother', phone: '+91 98470 3' + key.length + '333' + key.slice(-2).replace(/\D/g, '1'), idempotency_key: key })).data;
+    await M.patch(`/api/candidates/${c.id}`, { pretest_teacher_id: teacherA });
+    await M.put(`/api/candidates/${c.id}/result`, { recommended_course: 'Starter', assessment: 'ok', admission_status: 'Confirmed' });
+    return (await M.get(`/api/candidates/${c.id}`)).data;
+  };
+  const c1 = await mk('Anil', 'ad02-1');
+  assert.match(c1.student_code, /^NMS-\d{5}$/);
+  const pay = { advance: { amount: 1000, status: 'Paid', date: '2026-10-15', method: 'UPI' }, final: { amount: 1000, status: 'Pending', date: '2026-11-15' } };
+  const base = { student_id: c1.student_id, course: 'Starter', class_mode: '1:1', teacher_id: teacherA, start_date: '2026-10-26', total_classes: 30, total_fee: 2000, ...pay };
+
+  // Slot is required; Aadhaar is checked; duplicate student ID refused
+  let r = await M.post('/api/admissions', { ...base, idempotency_key: 'ad02-a' });
+  assert.equal(r.status, 400); assert.equal(r.data.field, 'Days');
+  r = await M.post('/api/admissions', { ...base, slot_days: [1, 3, 5], slot_time: '17:00', aadhaar: '2345 6789 0123', idempotency_key: 'ad02-b' });
+  assert.equal(r.status, 400); assert.equal(r.data.field, 'Aadhaar number');
+  const other = (await db.get('SELECT student_code FROM students WHERE id <> ? ORDER BY id LIMIT 1', [c1.student_id])).student_code;
+  r = await M.post('/api/admissions', { ...base, slot_days: [1, 3, 5], slot_time: '17:00', student_code: other, idempotency_key: 'ad02-c' });
+  assert.equal(r.status, 409);
+
+  // Slot check before saving: free slot (teacher A works Mon–Sat 9–15 in these tests -> 17:00 is outside hours)
+  r = await M.post('/api/admissions/slot-check', { teacher_id: teacherA, class_mode: '1:1', slot_days: [1, 3, 5], slot_time: '17:00', start_date: '2026-10-26', total_classes: 30 });
+  assert.equal(r.status, 200); assert.equal(r.data.end_date, '2027-01-01'); assert.equal(r.data.classes, 30);
+  assert.ok(r.data.warnings.some(w => /working hours/.test(w)));
+
+  r = await M.post('/api/admissions', { ...base, slot_days: [1, 3, 5], slot_time: '17:00', student_code: 'NM-STU-777', aadhaar: '2345 6789 0124', idempotency_key: 'ad02-d' });
+  assert.equal(r.status, 201, JSON.stringify(r.data));
+  assert.equal(r.data.end_date, '2027-01-01'); assert.equal(r.data.slot_days, '1,3,5'); assert.equal(r.data.slot_time, '17:00');
+  const stu = await db.get('SELECT * FROM students WHERE id = ?', [c1.student_id]);
+  assert.equal(stu.student_code, 'NM-STU-777'); assert.equal(stu.aadhaar_last4, '0124');
+  // The full Aadhaar number is stored nowhere (not even in the audit trail)
+  const leak = await db.get(`SELECT COUNT(*) n FROM audit_events WHERE after_json LIKE '%234567890124%' OR before_json LIKE '%234567890124%'`);
+  assert.equal(leak.n, 0);
+
+  // Another student wanting the same teacher at the same weekly slot gets a warning
+  const c2 = await mk('Bina', 'ad02-22');
+  r = await M.post('/api/admissions/slot-check', { teacher_id: teacherA, class_mode: '1:1', slot_days: [3], slot_time: '17:15', start_date: '2026-11-02', total_classes: 4 });
+  assert.ok(r.data.warnings.some(w => /already teaches Anil Kurup on Wed at 17:00/.test(w)), JSON.stringify(r.data));
+  r = await M.post('/api/admissions/slot-check', { teacher_id: teacherA, class_mode: '1:1', slot_days: [2], slot_time: '17:00', start_date: '2026-11-02', total_classes: 4 });
+  assert.ok(!r.data.warnings.some(w => /already teaches/.test(w)));
+  assert.equal((await S.post('/api/admissions/slot-check', { teacher_id: teacherA, slot_days: [2], slot_time: '17:00', start_date: '2026-11-02', total_classes: 4 })).status, 403);
+
+  // Changing total classes recalculates the end date
+  const enr = (await M.get(`/api/students/${c1.student_id}`)).data.enrollments[0];
+  r = await M.patch(`/api/enrollments/${enr.id}`, { total_classes: 3 });
+  assert.equal(r.data.end_date, '2026-10-30');
+
+  // Photos: Manager only; ID proof visible only to the Manager; student photo also to the teaching teacher
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8ffff3f0005fe02fea7d6a5e10000000049454e44ae426082', 'hex').toString('base64');
+  assert.equal((await T1.post(`/api/candidates/${c1.id}/files`, { kind: 'student_photo', filename: 'me.png', mime: 'image/png', data: png })).status, 403);
+  const photo = (await M.post(`/api/candidates/${c1.id}/files`, { kind: 'student_photo', filename: 'me.png', mime: 'image/png', data: png })).data;
+  const proof = (await M.post(`/api/candidates/${c1.id}/files`, { kind: 'id_proof', filename: 'id.png', mime: 'image/png', data: png })).data;
+  await M.post(`/api/candidates/${c1.id}/files`, { kind: 'student_photo', filename: 'me2.png', mime: 'image/png', data: png }); // replaces
+  assert.equal((await M.get(`/api/candidates/${c1.id}/files?kind=student_photo`)).data.length, 1);
+  assert.equal((await S.get(`/api/candidates/${c1.id}/files?kind=id_proof`)).status, 403);
+  const prof = (await M.get(`/api/students/${c1.student_id}`)).data;
+  assert.ok(prof.photo_file_id && prof.photo_file_id !== photo.id); assert.equal(prof.id_proof_file_id, proof.id);
+  assert.equal((await M.get(`/api/candidates/${c1.id}`)).data.file_count, 0); // photos are not test papers
+  const tprof = (await T1.get(`/api/students/${c1.student_id}`)).data;
+  assert.equal(tprof.aadhaar_last4, undefined); assert.equal(tprof.id_proof_file_id, null);
+
+  // Edit later: new Aadhaar, clear it
+  assert.equal((await M.patch(`/api/students/${c1.student_id}`, { aadhaar: '2345 6789 0124' })).data.aadhaar_last4, '0124');
+  assert.equal((await M.patch(`/api/students/${c1.student_id}`, { aadhaar: '' })).data.aadhaar_last4, null);
+  assert.equal((await S.patch(`/api/students/${c1.student_id}`, { student_code: 'X' })).status, 403);
+  void c2;
 });

@@ -358,7 +358,7 @@ export async function renderCandidate(page, { id }) {
     catch (e) { toast(e.message, 'error'); ev.target.disabled = false; ev.target.textContent = 'Create meeting link'; }
   });
   page.querySelector('#edit')?.addEventListener('click', () => candidateForm(c, reload));
-  page.querySelector('#setup')?.addEventListener('click', () => openAdmission({ student_id: c.student_id, student_name: c.student_name, lead_id: c.lead_id, sales_rep_name: c.sales_rep_name, recommended_course: r.recommended_course }, () => go('/student/' + c.student_id)));
+  page.querySelector('#setup')?.addEventListener('click', () => openAdmission({ student_id: c.student_id, student_code: c.student_code, candidate_id: c.id, student_name: c.student_name, lead_id: c.lead_id, sales_rep_name: c.sales_rep_name, recommended_course: r.recommended_course }, () => go('/student/' + c.student_id)));
 
   const panel = page.querySelector('#result-panel');
   const showForm = () => resultForm(panel, c, reload);
@@ -406,14 +406,14 @@ export const fmtFollowup = r => `${fmtDate(r.followup_date)}${r.followup_time ? 
 const kb = n => (n >= 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
 const isImage = m => /^image\/(jpeg|png|webp)$/.test(m);
 
-function guessType(file) {
+export function guessType(file) {
   if (file.type) return file.type;
   const ext = (file.name.split('.').pop() || '').toLowerCase();
   return { pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', heic: 'image/heic', heif: 'image/heif' }[ext] || '';
 }
 
 /** Phone photos are often 3–8 MB: resize to 1600 px and save as JPEG (~200–400 KB). */
-async function shrinkImage(file, type) {
+export async function shrinkImage(file, type) {
   if (!isImage(type)) return { blob: file, type, name: file.name };
   try {
     const bmp = await createImageBitmap(file);
@@ -427,7 +427,7 @@ async function shrinkImage(file, type) {
     return { blob, type: 'image/jpeg', name: file.name.replace(/\.[^.]+$/, '') + '.jpg' };
   } catch { return { blob: file, type, name: file.name }; }
 }
-const toBase64 = blob => new Promise((res, rej) => {
+export const toBase64 = blob => new Promise((res, rej) => {
   const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1]); fr.onerror = rej; fr.readAsDataURL(blob);
 });
 

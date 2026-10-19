@@ -84,6 +84,30 @@ function bool(v) { return v === true || v === 1 || v === '1' || v === 'true'; }
 const normPhone = p => String(p || '').replace(/\D/g, '').replace(/^0+/, '');
 const normName = n => String(n || '').trim().toLowerCase().replace(/\s+/g, ' ');
 
+/** Class dates from `start` on the given weekdays (0=Sun..6=Sat), `count` of them. */
+function projectDates(start, days, count) {
+  const set = new Set(days); const out = [];
+  if (!set.size || !count) return out;
+  let d = start;
+  for (let i = 0; out.length < count && i < 7 * 1100; i++) {
+    if (set.has(weekdayOf(d))) out.push(d);
+    d = addMinutes(`${d}T00:00`, 1440).slice(0, 10);
+  }
+  return out;
+}
+
+// Verhoeff checksum (used by Aadhaar numbers) — catches most typing mistakes.
+const VD = [[0,1,2,3,4,5,6,7,8,9],[1,2,3,4,0,6,7,8,9,5],[2,3,4,0,1,7,8,9,5,6],[3,4,0,1,2,8,9,5,6,7],[4,0,1,2,3,9,5,6,7,8],
+  [5,9,8,7,6,0,4,3,2,1],[6,5,9,8,7,1,0,4,3,2],[7,6,5,9,8,2,1,0,4,3],[8,7,6,5,9,3,2,1,0,4],[9,8,7,6,5,4,3,2,1,0]];
+const VP = [[0,1,2,3,4,5,6,7,8,9],[1,5,7,6,2,8,3,0,9,4],[5,8,0,3,7,9,6,1,4,2],[8,9,1,6,0,4,3,5,2,7],[9,4,5,3,1,2,6,8,7,0],
+  [4,2,8,6,5,7,3,9,0,1],[2,7,9,3,8,0,6,4,1,5],[7,0,4,6,9,1,3,2,5,8]];
+function isValidAadhaar(n) {
+  if (!/^[2-9][0-9]{11}$/.test(n)) return false;
+  let c = 0;
+  [...n].reverse().forEach((ch, i) => { c = VD[c][VP[i % 8][Number(ch)]]; });
+  return c === 0;
+}
+
 function inr(n) {
   return '₹' + Number(n || 0).toLocaleString('en-IN');
 }
@@ -91,5 +115,5 @@ function inr(n) {
 module.exports = {
   HttpError, bad, notFound, forbidden, conflict, unprocessable,
   TZ, nowParts, today, thisMonth, isValidDate, isValidDateTime, isValidTime, weekdayOf,
-  addMinutes, minutesOf, str, int, oneOf, bool, idParam, normPhone, normName, inr,
+  addMinutes, minutesOf, str, int, oneOf, bool, idParam, normPhone, normName, inr, projectDates, isValidAadhaar,
 };

@@ -21,14 +21,15 @@ const CHANNELS = ['WhatsApp', 'Call', 'Email'];
 const FILE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'application/pdf'];
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_FILES = 5;
+const FILE_KINDS = ['test_paper', 'student_photo', 'id_proof'];
 const PRETEST_MINUTES = 30; // assumed pre-test length, used for the teacher clash check
 
 const SELECT = `
   SELECT c.*, r.name AS sales_rep_name, t.name AS teacher_name, t.active AS teacher_active,
          pr.id AS result_id, pr.admission_status, pr.recommended_course, pr.reviewed_at,
          pr.followup_date, pr.followup_time, pr.followup_channel,
-         (SELECT COUNT(*) FROM pretest_files f WHERE f.candidate_id = c.id) AS file_count,
-         s.id AS student_id,
+         (SELECT COUNT(*) FROM pretest_files f WHERE f.candidate_id = c.id AND f.kind = 'test_paper') AS file_count,
+         s.id AS student_id, s.student_code,
          (SELECT COUNT(*) FROM enrollments e WHERE e.student_id = s.id) AS enrollment_count
   FROM candidates c
   JOIN users r ON r.id = c.sales_rep_id
@@ -358,18 +359,31 @@ module.exports = (app, { db }) => {
     return h.subarray(4, 8).toString('latin1') === 'ftyp'; // heic / heif
   };
 
+  // ID proof: Manager only. Student photo: also the student's teaching teacher.
+  const canSeeFile = async (user, c, f) => {
+    if (f.kind === 'id_proof') return user.role === 'manager';
+    if (canSee(user, c)) return true;
+    return f.kind === 'student_photo' && user.role === 'teacher' && !!(await db.get(`SELECT 1 AS x FROM enrollments e JOIN students s ON s.id = e.student_id
+      WHERE s.candidate_id = ? AND e.teacher_id = ?`, [c.id, user.teacher_id]));
+  };
+
   app.get('/api/candidates/:id/files', async (req, res) => {
     const c = await db.get('SELECT * FROM candidates WHERE id = ?', [idParam(req.params.id)]);
     if (!c || !canSee(req.user, c)) throw notFound('Candidate');
-    res.json(await db.all(`SELECT f.id, f.filename, f.mime, f.size_bytes, f.created_at, u.name AS uploaded_by_name
-      FROM pretest_files f JOIN users u ON u.id = f.uploaded_by WHERE f.candidate_id = ? ORDER BY f.id`, [c.id]));
+    const kind = oneOf(req.query.kind || 'test_paper', FILE_KINDS, { name: 'Kind' });
+    if (kind === 'id_proof' && req.user.role !== 'manager') throw forbidden();
+    res.json(await db.all(`SELECT f.id, f.kind, f.filename, f.mime, f.size_bytes, f.created_at, u.name AS uploaded_by_name
+      FROM pretest_files f JOIN users u ON u.id = f.uploaded_by WHERE f.candidate_id = ? AND f.kind = ? ORDER BY f.id`, [c.id, kind]));
   });
 
   app.post('/api/candidates/:id/files', requireRole('manager', 'teacher'), async (req, res) => {
     const c = await db.get('SELECT * FROM candidates WHERE id = ?', [idParam(req.params.id)]);
     if (!c || !canSee(req.user, c)) throw notFound('Candidate');
-    if (!(await canUpload(req.user, c))) throw bad('This result has been reviewed by the Manager and is now locked');
     const b = req.body;
+    const kind = oneOf(b.kind || 'test_paper', FILE_KINDS, { name: 'Kind' });
+    if (kind !== 'test_paper' && req.user.role !== 'manager') throw forbidden();
+    if (kind === 'test_paper' && !(await canUpload(req.user, c))) throw bad('This result has been reviewed by the Manager and is now locked');
+    if (kind !== 'test_paper' && !(await db.get('SELECT 1 AS x FROM students WHERE candidate_id = ?', [c.id]))) throw bad('Photos can be added once the student is Confirmed');
     const filename = str(b.filename, { required: true, name: 'File name', max: 150 }).replace(/[\\/\r\n"]/g, '_');
     const mime = oneOf(b.mime, FILE_TYPES, { required: true, name: 'File type' });
     const buf = Buffer.from(String(b.data || ''), 'base64');
@@ -378,20 +392,25 @@ module.exports = (app, { db }) => {
     if (!looksLike(buf, mime)) throw bad(`${filename} does not look like a valid ${mime === 'application/pdf' ? 'PDF' : 'image'}`);
     const id = await db.tx(async t => {
       await t.get('SELECT id FROM candidates WHERE id = ? FOR UPDATE', [c.id]);
-      const { n } = await t.get('SELECT COUNT(*) n FROM pretest_files WHERE candidate_id = ?', [c.id]);
-      if (n >= MAX_FILES) throw bad(`At most ${MAX_FILES} files per pre-test. Remove one first.`);
-      const r = await t.get(`INSERT INTO pretest_files (candidate_id, filename, mime, size_bytes, data, uploaded_by)
-        VALUES (?, ?, ?, ?, ?, ?) RETURNING id`, [c.id, filename, mime, buf.length, buf, req.user.id]);
-      await audit(t, req.user, 'candidate', c.id, 'file_uploaded', null, { file: filename, size: buf.length });
+      if (kind === 'test_paper') {
+        const { n } = await t.get(`SELECT COUNT(*) n FROM pretest_files WHERE candidate_id = ? AND kind = 'test_paper'`, [c.id]);
+        if (n >= MAX_FILES) throw bad(`At most ${MAX_FILES} files per pre-test. Remove one first.`);
+      } else {
+        if (mime === 'application/pdf' && kind === 'student_photo') throw bad('The student photo must be an image');
+        await t.run('DELETE FROM pretest_files WHERE candidate_id = ? AND kind = ?', [c.id, kind]); // one photo / one ID proof: replace
+      }
+      const r = await t.get(`INSERT INTO pretest_files (candidate_id, kind, filename, mime, size_bytes, data, uploaded_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`, [c.id, kind, filename, mime, buf.length, buf, req.user.id]);
+      await audit(t, req.user, 'candidate', c.id, 'file_uploaded', null, { kind, file: filename, size: buf.length });
       return r.id;
     });
-    res.status(201).json({ id, filename, mime, size_bytes: buf.length });
+    res.status(201).json({ id, kind, filename, mime, size_bytes: buf.length });
   });
 
   app.get('/api/files/:id', async (req, res) => {
     const f = await db.get('SELECT * FROM pretest_files WHERE id = ?', [idParam(req.params.id)]);
     const c = f && await db.get('SELECT * FROM candidates WHERE id = ?', [f.candidate_id]);
-    if (!f || !c || !canSee(req.user, c)) throw notFound('File');
+    if (!f || !c || !(await canSeeFile(req.user, c, f))) throw notFound('File');
     res.set({
       'Content-Type': f.mime,
       'Content-Disposition': `${req.query.download ? 'attachment' : 'inline'}; filename="${f.filename.replace(/[^\x20-\x7E]/g, '_')}"`,
@@ -402,10 +421,11 @@ module.exports = (app, { db }) => {
   });
 
   app.delete('/api/files/:id', requireRole('manager', 'teacher'), async (req, res) => {
-    const f = await db.get('SELECT id, candidate_id, filename FROM pretest_files WHERE id = ?', [idParam(req.params.id)]);
+    const f = await db.get('SELECT id, candidate_id, filename, kind FROM pretest_files WHERE id = ?', [idParam(req.params.id)]);
     const c = f && await db.get('SELECT * FROM candidates WHERE id = ?', [f.candidate_id]);
-    if (!f || !c || !canSee(req.user, c)) throw notFound('File');
-    if (!(await canUpload(req.user, c))) throw bad('This result has been reviewed by the Manager and is now locked');
+    if (!f || !c || !(await canSeeFile(req.user, c, f))) throw notFound('File');
+    if (f.kind !== 'test_paper' && req.user.role !== 'manager') throw forbidden();
+    if (f.kind === 'test_paper' && !(await canUpload(req.user, c))) throw bad('This result has been reviewed by the Manager and is now locked');
     await db.tx(async t => {
       await t.run('DELETE FROM pretest_files WHERE id = ?', [f.id]);
       await audit(t, req.user, 'candidate', c.id, 'file_removed', { file: f.filename }, null);

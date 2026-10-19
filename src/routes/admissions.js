@@ -4,8 +4,44 @@ const { audit, history } = require('../audit');
 const { isUniqueViolation } = require('../db');
 const { COURSES } = require('./candidates');
 const {
-  bad, notFound, conflict, unprocessable, str, int, oneOf, isValidDate, today, inr, idParam,
+  bad, notFound, conflict, unprocessable, str, int, oneOf, isValidDate, isValidTime, today, inr, idParam,
+  projectDates, isValidAadhaar, addMinutes, weekdayOf,
 } = require('../util');
+const { PRETEST_MINUTES } = require('./candidates');
+
+const DAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const DURATION = { '1:1': 30, '3:1': 40 };
+
+/** Preferred weekly slot: { slot_days: '1,3,5', slot_time: '17:00' } from the request. */
+function parseSlot(b, { required }) {
+  const raw = Array.isArray(b.slot_days) ? b.slot_days : String(b.slot_days ?? '').split(',').filter(x => x !== '');
+  const days = [...new Set(raw.map(Number))].filter(d => Number.isInteger(d) && d >= 0 && d <= 6).sort();
+  if (raw.length && days.length !== new Set(raw.map(String)).size) throw bad('Preferred days are not valid', { field: 'Days' });
+  if (required && !days.length) throw bad('Choose at least one preferred day', { field: 'Days' });
+  const time = str(b.slot_time, { required, name: 'Time (IST)', max: 5 });
+  if (time && !isValidTime(time)) throw bad('Preferred time is not valid', { field: 'Time (IST)' });
+  return { slot_days: days.length ? days.join(',') : null, slot_time: time };
+}
+const endDateOf = e => (e.slot_days ? projectDates(e.start_date, e.slot_days.split(',').map(Number), e.total_classes).at(-1) || null : null);
+
+/** Student ID typed by the Manager, and Aadhaar reduced to its last four digits. */
+async function parseIdentity(db, b, studentId) {
+  const out = {};
+  if (b.student_code !== undefined && b.student_code !== null && String(b.student_code).trim() !== '') {
+    out.student_code = str(b.student_code, { name: 'Student ID', max: 30 });
+    if (!/^[A-Za-z0-9][A-Za-z0-9_\-/]*$/.test(out.student_code)) throw bad('Student ID may contain letters, numbers, - _ / only', { field: 'Student ID' });
+    if (await db.get('SELECT 1 AS x FROM students WHERE lower(student_code) = lower(?) AND id <> ?', [out.student_code, studentId]))
+      throw conflict(`Student ID ${out.student_code} is already used`, { field: 'Student ID' });
+  }
+  if (b.aadhaar !== undefined) {
+    const digits = String(b.aadhaar ?? '').replace(/\s|-/g, '');
+    if (!digits) out.aadhaar_last4 = null;
+    else if (/^[0-9]{4}$/.test(digits) && b.aadhaar_keep_last4) out.aadhaar_last4 = digits; // unchanged value shown as XXXX XXXX 1234
+    else if (!isValidAadhaar(digits)) throw bad('This is not a valid Aadhaar number. Check the 12 digits.', { field: 'Aadhaar number' });
+    else out.aadhaar_last4 = digits.slice(-4); // the full number is never stored
+  }
+  return out;
+}
 
 const METHODS = ['UPI', 'Bank Transfer', 'Cash', 'Card', 'Other'];
 const MODES = ['1:1', '3:1'];
@@ -69,7 +105,7 @@ module.exports = (app, { db }) => {
   // Students with a Confirmed assessment and no enrollment yet.
   app.get('/api/admissions/pending', requireRole('manager'), async (_req, res) => {
     res.json(await db.all(`
-      SELECT s.id AS student_id, c.id AS candidate_id, c.lead_id, c.student_name, c.parent_name, c.age, c.location,
+      SELECT s.id AS student_id, s.student_code, s.aadhaar_last4, c.id AS candidate_id, c.lead_id, c.student_name, c.parent_name, c.age, c.location,
              r.name AS sales_rep_name, c.sales_rep_id, pr.recommended_course, pr.submitted_at, pr.recommendation,
              t.name AS pretest_teacher_name
       FROM students s JOIN candidates c ON c.id = s.candidate_id
@@ -105,8 +141,11 @@ module.exports = (app, { db }) => {
       start_date: str(b.start_date, { required: true, name: 'Start date', max: 10 }),
       total_fee: int(b.total_fee, { min: 0, max: 10_000_000, required: true, name: 'Total course fee' }),
       notes: str(b.notes, { name: 'Notes', max: 2000 }),
+      ...parseSlot(b, { required: true }),
     };
     if (!isValidDate(e.start_date)) throw bad('Start date is not valid', { field: 'Start date' });
+    e.end_date = endDateOf(e);
+    const identity = await parseIdentity(db, b, studentId);
     const t = await db.get('SELECT * FROM teachers WHERE id = ?', [e.teacher_id]);
     if (!t) throw bad('Teaching teacher not found');
     if (!t.active) throw bad('Teaching teacher is inactive');
@@ -129,16 +168,20 @@ module.exports = (app, { db }) => {
     try {
       id = await db.tx(async tx => {
         const r = await tx.get(`INSERT INTO enrollments (student_id, course, class_mode, total_classes, teacher_id, start_date,
-          admission_date, total_fee, lead_id, sales_rep_id, notes, idempotency_key, created_by)
+          admission_date, total_fee, lead_id, sales_rep_id, notes, slot_days, slot_time, end_date, idempotency_key, created_by)
           VALUES (@student_id, @course, @class_mode, @total_classes, @teacher_id, @start_date, @admission_date, @total_fee,
-          @lead_id, @sales_rep_id, @notes, @key, @by) RETURNING id`, {
+          @lead_id, @sales_rep_id, @notes, @slot_days, @slot_time, @end_date, @key, @by) RETURNING id`, {
           ...e, admission_date: today(), lead_id: st.lead_id, sales_rep_id: st.sales_rep_id, key, by: req.user.id,
         });
         for (const p of [adv, fin]) {
           await tx.run(`INSERT INTO payments (enrollment_id, stage, amount, status, date, method, reference)
             VALUES (@eid, @stage, @amount, @status, @date, @method, @reference)`, { ...p, eid: r.id });
         }
-        await audit(tx, req.user, 'enrollment', r.id, 'admitted', null, { ...e, advance: adv, final: fin });
+        if (Object.keys(identity).length) {
+          const sets = Object.keys(identity).map(k => `${k} = @${k}`).join(', ');
+          await tx.run(`UPDATE students SET ${sets} WHERE id = @id`, { ...identity, id: studentId });
+        }
+        await audit(tx, req.user, 'enrollment', r.id, 'admitted', null, { ...e, ...identity, advance: adv, final: fin });
         return r.id;
       });
     } catch (err) {
@@ -206,10 +249,13 @@ module.exports = (app, { db }) => {
       if (!isValidDate(e.start_date)) throw bad('Start date is not valid');
     }
     if (b.notes !== undefined) e.notes = str(b.notes, { name: 'Notes', max: 2000 });
+    if (b.slot_days !== undefined || b.slot_time !== undefined) Object.assign(e, parseSlot({ slot_days: b.slot_days ?? before.slot_days, slot_time: b.slot_time ?? before.slot_time }, { required: false }));
+    e.end_date = endDateOf(e);
     await db.tx(async tx => {
       // Guarded update: completed_classes may have changed since we read it.
       const r = await tx.run(`UPDATE enrollments SET teacher_id=@teacher_id, total_classes=@total_classes, status=@status,
-        start_date=@start_date, notes=@notes, updated_at=now_iso() WHERE id=@id AND completed_classes <= @total_classes`, e);
+        start_date=@start_date, notes=@notes, slot_days=@slot_days, slot_time=@slot_time, end_date=@end_date,
+        updated_at=now_iso() WHERE id=@id AND completed_classes <= @total_classes`, e);
       if (!r.rowCount) throw bad('Total classes cannot be less than the classes already completed');
       await audit(tx, req.user, 'enrollment', before.id, 'updated', before, e, str(b.reason, { max: 500 }));
     });
@@ -302,12 +348,12 @@ module.exports = (app, { db }) => {
   app.get('/api/students', requireRole('manager', 'teacher'), async (req, res) => {
     const q = req.query; const where = []; const p = {};
     if (req.user.role === 'teacher') { where.push('EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND x.teacher_id = @me)'); p.me = req.user.teacher_id; }
-    if (q.q) { where.push('(c.student_name ILIKE @q OR c.parent_name ILIKE @q OR c.lead_id ILIKE @q)'); p.q = `%${q.q}%`; }
+    if (q.q) { where.push('(c.student_name ILIKE @q OR c.parent_name ILIKE @q OR c.lead_id ILIKE @q OR s.student_code ILIKE @q)'); p.q = `%${q.q}%`; }
     if (q.status === 'awaiting') where.push('NOT EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id)');
     if (q.admitted && /^\d{4}-\d{2}$/.test(q.admitted)) { where.push('EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND substr(x.admission_date,1,7) = @adm)'); p.adm = q.admitted; }
     if (q.status === 'active') where.push(`EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND x.status='Active')`);
     const rows = await db.all(`
-      SELECT s.id, s.created_at, c.id AS candidate_id, c.lead_id, c.student_name, c.parent_name, c.age, c.location,
+      SELECT s.id, s.student_code, s.created_at, c.id AS candidate_id, c.lead_id, c.student_name, c.parent_name, c.age, c.location,
              ${req.user.role === 'manager' ? 'c.phone,' : ''} r.name AS sales_rep_name,
              e.id AS enrollment_id, e.course, e.class_mode, e.status AS enrollment_status, t.name AS teacher_name,
              e.total_classes, e.completed_classes, (e.total_classes - e.completed_classes) AS remaining_classes
@@ -319,7 +365,7 @@ module.exports = (app, { db }) => {
   });
 
   app.get('/api/students/:id', requireRole('manager', 'teacher'), async (req, res) => {
-    const s = await db.get(`SELECT c.*, c.id AS candidate_id, s.id AS id, s.created_at AS student_created_at, r.name AS sales_rep_name
+    const s = await db.get(`SELECT c.*, c.id AS candidate_id, s.id AS id, s.student_code, s.aadhaar_last4, s.created_at AS student_created_at, r.name AS sales_rep_name
       FROM students s JOIN candidates c ON c.id = s.candidate_id JOIN users r ON r.id = c.sales_rep_id WHERE s.id = ?`, [idParam(req.params.id)]);
     if (!s) throw notFound('Student');
     let enrollments = await db.all(`${ENROLL_SELECT} WHERE e.student_id = ? ORDER BY e.id DESC`, [s.id]);
@@ -327,7 +373,7 @@ module.exports = (app, { db }) => {
       enrollments = enrollments.filter(e => e.teacher_id === req.user.teacher_id);
       if (!enrollments.length) throw notFound('Student');
       enrollments = enrollments.map(teacherSafe);
-      delete s.phone; delete s.phone_norm;
+      delete s.phone; delete s.phone_norm; delete s.student_phone; delete s.aadhaar_last4;
     } else {
       for (const e of enrollments) { e.payments = await paymentsOf(e.id); e.money = moneySummary(e.total_fee, e.payments); }
     }
@@ -336,7 +382,80 @@ module.exports = (app, { db }) => {
     const ids = enrollments.map(e => e.id);
     const classes = ids.length ? await db.all(`SELECT cl.*, t.name AS teacher_name FROM classes cl JOIN teachers t ON t.id = cl.teacher_id
       WHERE cl.enrollment_id = ANY(?::int[]) ORDER BY cl.scheduled_at DESC LIMIT 200`, [ids]) : [];
+    const files = await db.all(`SELECT id, kind FROM pretest_files WHERE candidate_id = ? AND kind IN ('student_photo','id_proof') ORDER BY id DESC`, [s.candidate_id]);
+    s.photo_file_id = files.find(f => f.kind === 'student_photo')?.id ?? null;
+    s.id_proof_file_id = req.user.role === 'manager' ? (files.find(f => f.kind === 'id_proof')?.id ?? null) : null;
     res.json({ ...s, result, enrollments, classes });
+  });
+
+  // Manager edits the student's ID / Aadhaar later (photos use the file upload).
+  app.patch('/api/students/:id', requireRole('manager'), async (req, res) => {
+    const st = await db.get('SELECT * FROM students WHERE id = ?', [idParam(req.params.id)]);
+    if (!st) throw notFound('Student');
+    const identity = await parseIdentity(db, req.body, st.id);
+    if (Object.keys(identity).length) {
+      await db.tx(async tx => {
+        await tx.run(`UPDATE students SET ${Object.keys(identity).map(k => `${k} = @${k}`).join(', ')} WHERE id = @id`, { ...identity, id: st.id });
+        await audit(tx, req.user, 'student', st.id, 'updated', { student_code: st.student_code, aadhaar_last4: st.aadhaar_last4 }, identity);
+      });
+    }
+    res.json(await db.get('SELECT id, student_code, aadhaar_last4 FROM students WHERE id = ?', [st.id]));
+  });
+
+  // Warn (never block) when the teacher already has something in the preferred weekly slot.
+  app.post('/api/admissions/slot-check', requireRole('manager'), async (req, res) => {
+    const b = req.body;
+    const teacherId = int(b.teacher_id, { min: 1, required: true, name: 'Teaching teacher' });
+    const mode = oneOf(b.class_mode || '1:1', MODES, { name: 'Class mode' });
+    const slot = parseSlot(b, { required: true });
+    const start = str(b.start_date, { required: true, name: 'Start date', max: 10 });
+    if (!isValidDate(start)) throw bad('Start date is not valid');
+    const total = int(b.total_classes, { min: 1, max: 1000, required: true, name: 'Total classes' });
+    const excludeEnrollment = b.enrollment_id ? idParam(b.enrollment_id) : 0;
+    const teacher = await db.get('SELECT id, name FROM teachers WHERE id = ?', [teacherId]);
+    if (!teacher) throw notFound('Teacher');
+    const days = slot.slot_days.split(',').map(Number);
+    const dates = projectDates(start, days, total);
+    const end = dates.at(-1);
+    const minutes = DURATION[mode];
+    const st = slot.slot_time; const et = addMinutes(`2000-01-01T${st}`, minutes).slice(11);
+    const overlap = (a1, a2, b1, b2) => a1 < b2 && b1 < a2;
+    const warnings = []; const info = [];
+
+    // 1. Other active students with the same teacher in an overlapping weekly slot.
+    const others = await db.all(`SELECT e.id, e.class_mode, e.slot_days, e.slot_time, e.start_date, e.end_date, c.student_name
+      FROM enrollments e JOIN students s ON s.id = e.student_id JOIN candidates c ON c.id = s.candidate_id
+      WHERE e.teacher_id = ? AND e.status = 'Active' AND e.slot_days IS NOT NULL AND e.id <> ?`, [teacherId, excludeEnrollment]);
+    const group = [];
+    for (const o of others) {
+      const od = o.slot_days.split(',').map(Number).filter(d => days.includes(d));
+      const oet = addMinutes(`2000-01-01T${o.slot_time}`, DURATION[o.class_mode]).slice(11);
+      if (!od.length || !overlap(st, et, o.slot_time, oet) || (o.end_date && o.end_date < start) || o.start_date > end) continue;
+      if (mode === '3:1' && o.class_mode === '3:1' && o.slot_time === st) { group.push(o); continue; }
+      warnings.push(`${teacher.name} already teaches ${o.student_name} on ${od.map(d => DAY[d]).join('/')} at ${o.slot_time} (${o.class_mode})`);
+    }
+    if (group.length >= 3) warnings.push(`The 3:1 group at ${st} already has ${group.length} students (${group.map(g => g.student_name).join(', ')})`);
+    else if (group.length) info.push(`Joins the 3:1 group with ${group.map(g => g.student_name).join(', ')} (${group.length + 1}/3)`);
+
+    // 2. Booked classes and pre-tests on the projected dates.
+    if (dates.length) {
+      const booked = await db.all(`SELECT cl.scheduled_at, cl.duration_min, cl.format, c.student_name, e.id AS enrollment_id
+        FROM classes cl JOIN enrollments e ON e.id = cl.enrollment_id JOIN students s ON s.id = e.student_id JOIN candidates c ON c.id = s.candidate_id
+        WHERE cl.teacher_id = ? AND substr(cl.scheduled_at,1,10) = ANY(?::text[]) AND cl.status NOT IN ('Cancelled','Rescheduled') AND e.id <> ?`,
+      [teacherId, dates, excludeEnrollment]);
+      const clash = booked.filter(c => overlap(st, et, c.scheduled_at.slice(11), addMinutes(c.scheduled_at, c.duration_min).slice(11))
+        && !(mode === '3:1' && c.format === '3:1' && c.scheduled_at.slice(11) === st && group.some(g => g.id === c.enrollment_id)));
+      if (clash.length) warnings.push(`${clash.length} booked class${clash.length === 1 ? '' : 'es'} at that time, first: ${clash[0].student_name} on ${clash[0].scheduled_at.slice(0, 10)}`);
+      const pre = await db.all(`SELECT pretest_at, student_name FROM candidates WHERE pretest_teacher_id = ? AND substr(pretest_at,1,10) = ANY(?::text[]) AND status <> 'Cancelled'`, [teacherId, dates]);
+      const pclash = pre.filter(p => overlap(st, et, p.pretest_at.slice(11), addMinutes(p.pretest_at, PRETEST_MINUTES).slice(11)));
+      if (pclash.length) warnings.push(`${pclash.length} pre-test${pclash.length === 1 ? '' : 's'} at that time, first: ${pclash[0].student_name} on ${pclash[0].pretest_at.slice(0, 10)}`);
+    }
+    // 3. Working hours.
+    const hours = await db.all('SELECT weekday, start_time, end_time FROM teacher_hours WHERE teacher_id = ?', [teacherId]);
+    const outside = days.filter(d => !hours.some(h => h.weekday === d && h.start_time <= st && et <= h.end_time));
+    if (outside.length) warnings.push(`${outside.map(d => DAY[d]).join('/')} ${st}–${et} is outside ${teacher.name}'s working hours`);
+
+    res.json({ teacher: teacher.name, end_date: end || null, classes: dates.length, warnings, info });
   });
 };
 

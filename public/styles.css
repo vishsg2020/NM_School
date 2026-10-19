@@ -301,3 +301,49 @@ progress::-moz-progress-bar { background: var(--green); }
 
 @media (max-width: 820px) { .side-bell { display: none; } }
 #result-files h3 { margin: 16px 0 4px; }
+
+/* Admission setup (AD-02/04/05) */
+.drawer.wide { width: min(760px, 100vw); }
+.center { text-align: center; }
+.top-gap { margin-top: 28px; }
+.label { display: block; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+.ident { display: grid; grid-template-columns: 104px 1fr; gap: 16px; align-items: start; }
+.avatar { width: 96px; height: 96px; border-radius: 50%; border: 2px dashed #B7C4BE; display: flex; align-items: center; justify-content: center; text-align: center; font-size: 12px; color: var(--muted); background: var(--surface); cursor: pointer; overflow: hidden; font-weight: 400; }
+.avatar:hover { border-color: var(--brand); }
+.avatar img { width: 100%; height: 100%; object-fit: cover; }
+.avatar.solid { border-style: solid; cursor: default; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { position: relative; margin: 0; }
+.chip input, .methods .m input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.chip span { display: block; border: 1px solid var(--line); border-radius: 18px; padding: 6px 13px; font: 500 13px/1.2 var(--sans); background: var(--paper); cursor: pointer; }
+.chip input:checked + span { background: var(--green); border-color: var(--green); color: #fff; }
+.chip input:focus-visible + span, .methods .m input:focus-visible + span { outline: 2px solid var(--brand); outline-offset: 2px; }
+.end { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; background: var(--green-soft); border: 1px solid #CFE6C3; border-radius: 8px; padding: 10px 12px; font-size: 14px; margin-bottom: 10px; }
+.end strong { font-size: 16px; color: var(--green-deep); }
+.ok-line { color: var(--green-deep); margin: 0; }
+.calc { display: flex; align-items: center; gap: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font-size: 14px; margin-bottom: 12px; }
+.calc button { margin-left: auto; }
+.money { position: relative; }
+.money > span { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--muted); font-weight: 600; pointer-events: none; }
+.money input { padding-left: 28px; font-size: 18px; font-weight: 600; }
+.pays { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.pay { border: 1px solid var(--line); border-radius: 10px; background: var(--paper); overflow: hidden; }
+.pay.is-paid { border-color: #CFE6C3; }
+.pay-h { display: flex; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--surface); font-weight: 600; }
+.pay-h .st { margin-left: auto; }
+.pay-b { padding: 12px 14px; }
+.pay .seg { margin-bottom: 12px; }
+.methods { display: flex; flex-wrap: wrap; gap: 6px; }
+.methods .m { position: relative; margin: 0; }
+.methods .m span { display: block; border: 1px solid var(--line); border-radius: 6px; padding: 6px 11px; font: 500 13px/1.2 var(--sans); background: var(--paper); cursor: pointer; }
+.methods .m input:checked + span { border-color: var(--green); background: var(--green-soft); color: var(--green-deep); font-weight: 600; }
+.sum { margin-top: 14px; padding: 12px 14px; border-radius: 10px; background: var(--surface); border: 1px solid var(--line); font-size: 15px; }
+.sum-line { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.sum-state { margin-left: auto; font-weight: 700; }
+.sum.good { background: var(--green-soft); border-color: #CFE6C3; } .sum.good .sum-state { color: var(--green-deep); }
+.sum.bad { background: var(--red-soft); border-color: #EDC2BA; } .sum.bad .sum-state { color: var(--red); }
+.bar { height: 10px; border-radius: 6px; overflow: hidden; display: flex; margin-top: 8px; background: var(--line); }
+.bar .a { background: var(--green); } .bar .f { background: #E0A526; }
+@media (max-width: 820px) { .pays { grid-template-columns: 1fr; } .ident { grid-template-columns: 1fr; } }
+.head-with-photo { display: flex; align-items: center; gap: 14px; }
+.head-photo { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; border: 2px solid var(--green-soft); }
