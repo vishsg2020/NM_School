@@ -7,6 +7,7 @@ import * as classes from './pages/classes.js';
 import * as teachers from './pages/teachers.js';
 import * as reports from './pages/reports.js';
 import * as users from './pages/users.js';
+import * as settings from './pages/settings.js';
 
 const app = document.getElementById('app');
 
@@ -28,6 +29,7 @@ const NAV = [
     { path: 'teachers', label: 'Teachers', roles: ['manager'] },
     { path: 'reports', label: 'Reports', roles: ['manager'] },
     { path: 'users', label: 'Users', roles: ['manager'] },
+    { path: 'settings', label: 'Settings', roles: ['manager'] },
   ] },
 ];
 
@@ -44,6 +46,7 @@ const ROUTES = {
   teachers: teachers.render,
   reports: reports.render,
   users: users.render,
+  settings: settings.render,
   account: users.renderAccount,
 };
 

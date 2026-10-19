@@ -2,6 +2,7 @@
 const { requireRole } = require('../auth');
 const { audit, history } = require('../audit');
 const { isUniqueViolation } = require('../db');
+const google = require('../google');
 const {
   bad, notFound, forbidden, conflict, str, int, oneOf, bool, isValidDateTime, isValidDate, normPhone, normName, idParam,
   addMinutes, weekdayOf,
@@ -112,6 +113,38 @@ function checkPersonRules(c) {
   } else {
     // An adult's own number is the main phone; there is no separate student phone.
     c.student_phone = null;
+  }
+}
+
+/**
+ * Keeps the candidate's Google Meet event in step with the pre-test (best effort, never blocks a save).
+ * Creates a meeting once the time is confirmed, moves it when the time or name changes,
+ * and removes it when the pre-test is cancelled or its time is cleared.
+ * Returns { meet_error } or { meet_status: 'not_connected' } for the browser to show, or {}.
+ */
+async function syncMeet(db, before, c) {
+  const wants = !!c.pretest_at && c.status !== 'Cancelled' && (c.time_confirmation === 'Confirmed' || !!c.meet_event_id);
+  const s = await google.readSettings(db);
+  if (!google.isConnected(s)) return wants && !c.meet_event_id ? { meet_status: 'not_connected' } : {};
+  const save = (link, eventId) => db.run('UPDATE candidates SET meet_link = ?, meet_event_id = ? WHERE id = ?', [link, eventId, c.id]);
+  try {
+    if (c.meet_event_id && !wants) {
+      await google.deleteMeeting(db, s, c.meet_event_id);
+      await save(null, null);
+    } else if (c.meet_event_id && before && (before.pretest_at !== c.pretest_at || before.student_name !== c.student_name)) {
+      try { await google.moveMeeting(db, s, c, PRETEST_MINUTES); } catch (e) {
+        if (e.status !== 404 && e.status !== 410) throw e;
+        const m = await google.createMeeting(db, s, c, PRETEST_MINUTES); // removed in Google Calendar: make a new one
+        await save(m.meet_link, m.meet_event_id);
+      }
+    } else if (!c.meet_event_id && wants) {
+      const m = await google.createMeeting(db, s, c, PRETEST_MINUTES);
+      await save(m.meet_link, m.meet_event_id);
+    }
+    return {};
+  } catch (e) {
+    console.error('Google Meet sync failed:', e.message);
+    return { meet_error: `The pre-test was saved, but the Google Meet link could not be ${c.meet_event_id ? 'updated' : 'created'}: ${e.message}` };
   }
 }
 
@@ -235,7 +268,8 @@ module.exports = (app, { db }) => {
       if (isUniqueViolation(e)) { const again = await replay(); if (again) return res.status(200).json(again); }
       throw e;
     }
-    res.status(201).json(await byId(id));
+    const meet = await syncMeet(db, null, await db.get('SELECT * FROM candidates WHERE id = ?', [id]));
+    res.status(201).json({ ...(await byId(id)), ...meet });
   });
 
   app.patch('/api/candidates/:id', requireRole('manager', 'sales'), async (req, res) => {
@@ -284,7 +318,20 @@ module.exports = (app, { db }) => {
         pretest_teacher_id=@pretest_teacher_id, status=@status, notes=@notes, updated_at=now_iso() WHERE id=@id`, c);
       await audit(t, req.user, 'candidate', before.id, 'updated', before, c, str(b.reason, { max: 500 }));
     });
-    res.json(await byId(before.id));
+    const meet = await syncMeet(db, before, c);
+    res.json({ ...(await byId(before.id)), ...meet });
+  });
+
+  // Create the Meet link on demand (older candidates, or after connecting Google / fixing an error).
+  app.post('/api/candidates/:id/meet', requireRole('manager', 'sales'), async (req, res) => {
+    const c = await db.get('SELECT * FROM candidates WHERE id = ?', [idParam(req.params.id)]);
+    if (!c) throw notFound('Candidate');
+    if (!c.pretest_at) throw bad('Set the pre-test date and time first');
+    if (c.status === 'Cancelled') throw bad('This pre-test is cancelled');
+    if (!google.isConnected(await google.readSettings(db))) throw bad('Google is not connected yet. The Manager can connect it in Settings.', { code: 'GOOGLE_NOT_CONNECTED' });
+    const meet = await syncMeet(db, c, { ...c, time_confirmation: 'Confirmed' });
+    if (meet.meet_error) throw bad(meet.meet_error);
+    res.json(await byId(c.id));
   });
 
   // ---------- Teacher clash check for a pre-test time (warning only, never blocks) ----------

@@ -1,6 +1,6 @@
 import {
   state, api, get, esc, html, raw, pill, fmtDT, fmtStamp, fmtTime, table, drawer, onSubmit, options, opt, teacherOptions,
-  setQuery, can, toast, uid, go, ApiError, stateBox,
+  setQuery, can, toast, uid, go, ApiError, stateBox, copyText,
 } from '../core.js';
 import { openAdmission } from './admissions.js';
 
@@ -39,6 +39,7 @@ export async function renderQueue(page, { query }) {
   const form = page.querySelector('#filters');
   const list = page.querySelector('#list');
   let seq = 0;
+  let lastRows = [];
   async function load() {
     const d = Object.fromEntries(new FormData(form));
     if (f.date === 'none' && !d.date) d.date = 'none';
@@ -49,6 +50,7 @@ export async function renderQueue(page, { query }) {
       const params = new URLSearchParams(Object.entries(d).filter(([, v]) => v)).toString();
       const rows = await get('/api/candidates' + (params ? '?' + params : ''));
       if (my !== seq) return;
+      lastRows = rows;
       const active = Object.entries(d).filter(([, v]) => v).length;
       page.querySelector('#count').textContent = `${rows.length} candidate${rows.length === 1 ? '' : 's'}${active ? ' match the filters' : ''}`;
       list.innerHTML = renderTable(rows, active);
@@ -66,6 +68,8 @@ export async function renderQueue(page, { query }) {
   });
   page.querySelector('#add-cand')?.addEventListener('click', () => candidateForm(null, load));
   list.addEventListener('click', async e => {
+    const cp = e.target.closest('[data-copy-row]');
+    if (cp) { const row = lastRows.find(x => String(x.id) === cp.dataset.copyRow); if (row) copyText(row.meet_link, 'Meeting link copied'); return; }
     const b = e.target.closest('[data-edit]');
     if (b) { const c = await get('/api/candidates/' + b.dataset.edit); candidateForm(c, load); }
   });
@@ -82,12 +86,44 @@ function renderTable(rows, filtered) {
     { label: 'Teacher', cell: r => (r.teacher_name ? esc(r.teacher_name) + (r.teacher_active ? '' : ' <span class="muted">(inactive)</span>') : pill('Unassigned', 'amber').__raw) },
     { label: 'Status', cell: r => pill(r.status).__raw + (r.admission_status ? `<span class="sub">Result: ${esc(r.admission_status)}</span>` : '') },
     ...(isTeacher ? [] : [{ label: 'Sales rep', cell: r => esc(r.sales_rep_name) }]),
-    { label: 'Actions', cls: 'cell-actions', cell: r => isTeacher
+    { label: 'Actions', cls: 'cell-actions', cell: r => (r.meet_link ? `<button class="btn small" type="button" data-copy-row="${r.id}" title="Copy Google Meet link">Copy link</button> ` : '') + (isTeacher
       ? `<a class="btn small ${r.result_id ? '' : 'primary'}" href="#/candidate/${r.id}">${r.result_id ? 'View result' : 'Record result'}</a>`
-      : `<button class="btn small" type="button" data-edit="${r.id}">Edit</button> <a class="btn small" href="#/candidate/${r.id}">Open</a>` },
+      : `<button class="btn small" type="button" data-edit="${r.id}">Edit</button> <a class="btn small" href="#/candidate/${r.id}">Open</a>`) },
   ], rows, filtered
     ? { empty: 'No candidates match these filters', emptyHint: ' Try clearing a filter.' }
     : { empty: isTeacher ? 'No pre-tests assigned to you yet' : 'No candidates yet', emptyHint: isTeacher ? '' : ' Add the first candidate to start the queue.' });
+}
+
+const PRETEST_MINUTES = 30;
+
+/** Text staff paste into WhatsApp or email. */
+export function meetMessage(c) {
+  return `Nalla Malayalam – Malayalam pre-test\nStudent: ${c.student_name}\nWhen: ${fmtDT(c.pretest_at)} IST (${PRETEST_MINUTES} minutes)\nJoin on Google Meet: ${c.meet_link}`;
+}
+function meetButtons(c) {
+  return `<button class="btn small" type="button" data-copy-link="${esc(c.meet_link)}">Copy meeting link</button>
+    <button class="btn small" type="button" data-copy-msg>Copy invite message</button>`;
+}
+function wireMeetButtons(root, c) {
+  root.querySelectorAll('[data-copy-link]').forEach(b => b.addEventListener('click', () => copyText(c.meet_link, 'Meeting link copied')));
+  root.querySelectorAll('[data-copy-msg]').forEach(b => b.addEventListener('click', () => copyText(meetMessage(c), 'Invite message copied')));
+}
+/** After saving: show the Meet link, or say why there is none. */
+function reportMeet(r, isNew) {
+  if (r.meet_error) { toast(r.meet_error, 'error'); return; }
+  if (r.meet_status === 'not_connected') { toast(can('manager') ? 'No Meet link: connect Google in Settings first.' : 'No Meet link yet: Google is not connected (Manager → Settings).', 'error'); return; }
+  if (isNew && r.meet_link) {
+    drawer({
+      title: 'Pre-test added',
+      body: html`<p><strong>${r.student_name}</strong> · ${r.lead_id}</p>
+        <p>${fmtDT(r.pretest_at)} IST · ${PRETEST_MINUTES} minutes</p>
+        <div class="meet-box"><span class="meet-label">Google Meet</span><a href="${r.meet_link}" target="_blank" rel="noopener">${r.meet_link}</a></div>
+        <div class="row">${raw(meetButtons(r))}</div>
+        <p class="small muted">Share the link or the message over WhatsApp or email. It is also on the candidate's page.</p>`,
+      foot: `<a class="btn" href="#/candidate/${r.id}">Open candidate</a><button class="btn primary" type="button" data-close>Done</button>`,
+      onMount: d => { wireMeetButtons(d, r); d.querySelectorAll('a.btn').forEach(a => a.addEventListener('click', () => d.querySelector('[data-close]').click())); },
+    });
+  }
 }
 
 const GENDERS = ['Male', 'Female', 'Prefer not to say'];
@@ -248,6 +284,7 @@ export function candidateForm(c, after) {
           close();
           toast(editing ? 'Candidate updated' : `Candidate added as ${r.lead_id}`);
           after && after();
+          reportMeet(r, !editing);
         } catch (e) {
           if (e instanceof ApiError && e.data.code === 'POSSIBLE_DUPLICATE') {
             const box = d.querySelector('#dup-box');
@@ -262,6 +299,19 @@ export function candidateForm(c, after) {
       });
     },
   });
+}
+
+function meetPanel(c) {
+  if (c.meet_link) {
+    return `<section class="panel"><h2>Google Meet</h2>
+      <div class="meet-box"><a href="${esc(c.meet_link)}" target="_blank" rel="noopener">${esc(c.meet_link)}</a></div>
+      <div class="row">${meetButtons(c)}</div></section>`;
+  }
+  if (c.status === 'Cancelled') return '';
+  const canMake = can('manager', 'sales') && c.pretest_at;
+  return `<section class="panel"><h2>Google Meet</h2>
+    <p class="muted small">${c.pretest_at ? 'No meeting link yet.' : 'A meeting link is created when the pre-test time is confirmed.'}</p>
+    ${canMake ? '<button class="btn small" type="button" id="make-meet">Create meeting link</button>' : ''}</section>`;
 }
 
 export async function renderCandidate(page, { id }) {
@@ -280,6 +330,7 @@ export async function renderCandidate(page, { id }) {
       </div></div>
     <div class="cols-3">
       <div class="stack">
+        ${raw(meetPanel(c))}
         <section class="panel" id="result-panel"></section>
         ${raw(c.history ? `<section class="panel"><h2>Change history</h2>${historyList(c.history)}</section>` : '')}
       </div>
@@ -298,6 +349,12 @@ export async function renderCandidate(page, { id }) {
       </dl></section>
     </div>`;
   const reload = () => renderCandidate(page, { id });
+  wireMeetButtons(page, c);
+  page.querySelector('#make-meet')?.addEventListener('click', async ev => {
+    ev.target.disabled = true; ev.target.textContent = 'Creating…';
+    try { await api('POST', `/api/candidates/${c.id}/meet`); toast('Meeting link created'); reload(); }
+    catch (e) { toast(e.message, 'error'); ev.target.disabled = false; ev.target.textContent = 'Create meeting link'; }
+  });
   page.querySelector('#edit')?.addEventListener('click', () => candidateForm(c, reload));
   page.querySelector('#setup')?.addEventListener('click', () => openAdmission({ student_id: c.student_id, student_name: c.student_name, lead_id: c.lead_id, sales_rep_name: c.sales_rep_name, recommended_course: r.recommended_course }, () => go('/student/' + c.student_id)));
 

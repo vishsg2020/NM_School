@@ -27,7 +27,7 @@ function client() {
     return { status: res.status, data };
   }
   return {
-    get: u => call('GET', u), post: (u, b) => call('POST', u, b), patch: (u, b) => call('PATCH', u, b), put: (u, b) => call('PUT', u, b),
+    get: u => call('GET', u), post: (u, b) => call('POST', u, b), patch: (u, b) => call('PATCH', u, b), put: (u, b) => call('PUT', u, b), del: u => call('DELETE', u),
     login: async email => { const r = await call('POST', '/api/login', { email, password: pw }); assert.equal(r.status, 200, JSON.stringify(r.data)); return r; },
   };
 }
@@ -406,4 +406,101 @@ test('PT-03: teacher clash check warns about overlapping pre-tests and classes (
   }
   assert.equal((await S.get(`/api/pretest-clash?teacher=${teacherA}&at=2026-11-02T17:15`)).status, 403);
   assert.equal((await M.get(`/api/pretest-clash?teacher=${teacherA}&at=bad`)).status, 400);
+});
+
+test('Google Meet: Manager connects Google in Settings; confirmed pre-tests get a copyable Meet link', async () => {
+  const google = require('../src/google');
+  const calls = []; let n = 0; let failCreate = false;
+  google.setFetch(async (url, opts = {}) => {
+    const u = String(url); const method = opts.method || 'GET';
+    calls.push({ method, url: u, body: opts.body });
+    const json = (status, body) => ({ ok: status < 300, status, json: async () => body });
+    if (u.startsWith('https://oauth2.googleapis.com/token')) {
+      const p = new URLSearchParams(opts.body);
+      if (p.get('grant_type') === 'authorization_code') return json(200, { access_token: 'at', refresh_token: 'rt-1', expires_in: 3600 });
+      return json(200, { access_token: 'at2', expires_in: 3600 });
+    }
+    if (u.startsWith('https://openidconnect.googleapis.com')) return json(200, { email: 'nmlflow@gmail.com' });
+    if (u.startsWith('https://oauth2.googleapis.com/revoke')) return json(200, {});
+    if (u.startsWith('https://www.googleapis.com/calendar/v3/calendars/primary/events')) {
+      if (method === 'POST') {
+        if (failCreate) return json(500, { error: { message: 'Backend Error' } });
+        n++; return json(200, { id: 'ev' + n, hangoutLink: `https://meet.google.com/abc-defg-00${n}` });
+      }
+      if (method === 'PATCH') return json(200, { id: 'x' });
+      if (method === 'DELETE') return { ok: true, status: 204, json: async () => null };
+    }
+    return json(404, { error: 'unexpected ' + u });
+  });
+  const child = { first_name: 'Nila', last_name: 'Varma', age: 8, parent_name: 'Gita', parent_relationship: 'Mother', phone: '+91 98470 11111' };
+
+  // Not connected yet: the pre-test is saved without a link
+  let r = await S.post('/api/candidates', { ...child, time_confirmation: 'Confirmed', pretest_at: '2026-11-05T16:00', idempotency_key: 'gm-1' });
+  assert.equal(r.status, 201); assert.equal(r.data.meet_link, null); assert.equal(r.data.meet_status, 'not_connected');
+  const early = r.data;
+  assert.equal((await S.post(`/api/candidates/${early.id}/meet`)).status, 400);
+
+  // Settings are Manager only
+  assert.equal((await S.get('/api/settings/google')).status, 403);
+  let g = (await M.get('/api/settings/google')).data;
+  assert.equal(g.connected, false); assert.match(g.redirect_uri, /\/api\/google\/callback$/);
+  assert.equal((await M.put('/api/settings/google', { client_id: 'nope', client_secret: 's' })).status, 400);
+  assert.equal((await M.put('/api/settings/google', { client_id: '123-abc.apps.googleusercontent.com' })).status, 400); // secret needed
+  assert.equal((await M.put('/api/settings/google', { client_id: '123-abc.apps.googleusercontent.com', client_secret: 'GOCSPX-test' })).status, 200);
+
+  // Connect: a wrong state is refused; the right one stores the account
+  r = await M.post('/api/settings/google/connect');
+  const auth = new URL(r.data.url);
+  assert.equal(auth.hostname, 'accounts.google.com'); assert.equal(auth.searchParams.get('access_type'), 'offline');
+  assert.match(auth.searchParams.get('scope'), /calendar\.events/);
+  await M.get('/api/google/callback?code=c1&state=wrong');
+  assert.equal((await M.get('/api/settings/google')).data.connected, false);
+  r = await M.post('/api/settings/google/connect');
+  await M.get(`/api/google/callback?code=c1&state=${new URL(r.data.url).searchParams.get('state')}`);
+  g = (await M.get('/api/settings/google')).data;
+  assert.equal(g.connected, true); assert.equal(g.account_email, 'nmlflow@gmail.com');
+
+  // On-demand link for the earlier candidate
+  r = await S.post(`/api/candidates/${early.id}/meet`);
+  assert.equal(r.status, 200); assert.match(r.data.meet_link, /^https:\/\/meet\.google\.com\//);
+
+  // A confirmed pre-test gets a link straight away; no invitations are emailed
+  r = await S.post('/api/candidates', { ...child, first_name: 'Tara', time_confirmation: 'Confirmed', pretest_at: '2026-11-06T17:00', idempotency_key: 'gm-2' });
+  assert.equal(r.status, 201); assert.match(r.data.meet_link, /^https:\/\/meet\.google\.com\//);
+  const cand = r.data;
+  const create = calls.filter(c => c.method === 'POST' && c.url.includes('/calendar/')).at(-1);
+  assert.match(create.url, /conferenceDataVersion=1/); assert.match(create.url, /sendUpdates=none/);
+  const ev = JSON.parse(create.body);
+  assert.equal(ev.start.dateTime, '2026-11-06T17:00:00'); assert.equal(ev.end.dateTime, '2026-11-06T17:30:00');
+  assert.equal(ev.start.timeZone, 'Asia/Kolkata'); assert.equal(ev.attendees, undefined);
+
+  // Not confirmed => no link
+  r = await S.post('/api/candidates', { ...child, first_name: 'Dev', time_confirmation: 'Not Confirmed', idempotency_key: 'gm-3' });
+  assert.equal(r.data.meet_link, null);
+
+  // The assigned teacher can see the link
+  await M.patch(`/api/candidates/${cand.id}`, { pretest_teacher_id: teacherA });
+  assert.equal((await T1.get(`/api/candidates/${cand.id}`)).data.meet_link, cand.meet_link);
+
+  // Moving the time moves the event; the link stays the same
+  r = await S.patch(`/api/candidates/${cand.id}`, { pretest_at: '2026-11-07T18:00' });
+  assert.equal(r.data.meet_link, cand.meet_link);
+  assert.ok(calls.some(c => c.method === 'PATCH' && c.url.includes(cand.meet_event_id)));
+
+  // Cancelling removes the event and the link
+  r = await S.patch(`/api/candidates/${cand.id}`, { status: 'Cancelled' });
+  assert.equal(r.data.meet_link, null);
+  assert.ok(calls.some(c => c.method === 'DELETE' && c.url.includes(cand.meet_event_id)));
+
+  // A Google failure never blocks saving the pre-test
+  failCreate = true;
+  r = await S.post('/api/candidates', { ...child, first_name: 'Kabir', time_confirmation: 'Confirmed', pretest_at: '2026-11-08T10:00', idempotency_key: 'gm-4' });
+  assert.equal(r.status, 201); assert.equal(r.data.meet_link, null); assert.match(r.data.meet_error, /Backend Error/);
+  failCreate = false;
+
+  // Disconnect
+  assert.equal((await M.del('/api/settings/google/connection')).status, 200);
+  assert.equal((await M.get('/api/settings/google')).data.connected, false);
+  assert.ok(calls.some(c => c.url.includes('/revoke')));
+  google.setFetch((...a) => globalThis.fetch(...a));
 });

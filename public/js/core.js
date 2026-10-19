@@ -220,3 +220,17 @@ export const teacherOptions = (selected, { activeOnly = true, blank = 'Select te
   options(state.teachers.filter(t => (!activeOnly || t.active || String(t.id) === String(selected)) &&
     (!mode || (mode === '1:1' ? t.supports_1to1 : t.supports_3to1)))
     .map(t => [t.id, t.name + (t.active ? '' : ' (inactive)')]), selected, blank === null ? undefined : blank);
+
+// ---------- Clipboard ----------
+export async function copyText(text, done = 'Copied') {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Fallback for browsers that block the clipboard API.
+    const ta = document.createElement('textarea'); ta.value = text; ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.append(ta); ta.select();
+    const ok = document.execCommand('copy'); ta.remove();
+    if (!ok) { toast('Could not copy. Select the link and copy it manually.', 'error'); return; }
+  }
+  toast(done);
+}

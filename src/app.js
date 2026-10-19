@@ -50,6 +50,7 @@ function createApp(db) {
   require('./routes/admissions')(app, ctx);
   require('./routes/classes')(app, ctx);
   require('./routes/reports')(app, ctx);
+  require('./routes/settings')(app, ctx);
 
   app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Not found')));
   app.use(express.static(path.join(__dirname, '..', 'public'), { index: 'index.html', maxAge: '1h' }));

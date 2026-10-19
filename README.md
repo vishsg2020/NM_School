@@ -120,6 +120,19 @@ For the first local Manager, put `INITIAL_MANAGER_EMAIL` and `INITIAL_MANAGER_PA
 
 ---
 
+## Google Meet links for pre-tests
+
+When a pre-test time is **confirmed**, the app creates a 30-minute event with a Google Meet link in the Google
+account the Manager connected (currently `nmlflow@gmail.com`). No invitations are emailed: staff use
+**Copy meeting link** or **Copy invite message** (candidate page, queue, or the "Pre-test added" panel) and share it on
+WhatsApp or email. Moving the time moves the event; cancelling removes it. If Google is not connected or fails, the
+pre-test is still saved and the link can be created later with **Create meeting link**.
+
+Setup is done in the app: **Manager → Settings** lists the one-time Google Cloud steps (enable Google Calendar API,
+consent screen published "In production", a Web OAuth client whose redirect URI is shown on the page), then
+**Connect Google account**. Add the redirect URI for every address the app runs on (stage and production).
+Optional: `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` environment variables are used if nothing is saved in Settings.
+
 ## Backups and restore
 
 - **Weekly:** the GitHub Action above. **On demand:** `DATABASE_URL="<supabase uri>" npm run backup` writes a consistent JSON export of every table to `./backups/` and keeps the newest 30.
