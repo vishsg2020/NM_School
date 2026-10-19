@@ -8,7 +8,8 @@ const { HttpError } = require('./util');
 function createApp(db) {
   const app = express();
   app.disable('x-powered-by');
-  if (process.env.TRUST_PROXY) app.set('trust proxy', process.env.TRUST_PROXY);
+  // Netlify (and most hosts) sit behind a proxy; trust it so req.ip is the visitor's address.
+  if (process.env.TRUST_PROXY || process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME) app.set('trust proxy', process.env.TRUST_PROXY || true);
 
   app.use((req, res, next) => {
     res.set({
@@ -35,12 +36,12 @@ function createApp(db) {
   });
 
   const ctx = { db, auth };
-  app.post('/api/login', (req, res) => {
-    const user = auth.login(req, res, req.body.email, req.body.password);
+  app.post('/api/login', async (req, res) => {
+    const user = await auth.login(req, res, req.body.email, req.body.password);
     res.json({ user });
   });
-  app.post('/api/logout', (req, res) => { auth.logout(req, res); res.json({ ok: true }); });
-  app.get('/api/health', (_req, res) => { db.prepare('SELECT 1').get(); res.json({ ok: true }); });
+  app.post('/api/logout', async (req, res) => { await auth.logout(req, res); res.json({ ok: true }); });
+  app.get('/api/health', async (_req, res) => { await db.get('SELECT 1 AS ok'); res.json({ ok: true }); });
 
   app.use('/api', requireAuth);
   require('./routes/users')(app, ctx);
@@ -58,8 +59,9 @@ function createApp(db) {
   app.use((err, req, res, _next) => {
     if (err instanceof HttpError) return res.status(err.status).json({ error: err.message, ...err.extra });
     if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON body' });
-    if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'This record already exists' });
-    if (err.code && String(err.code).startsWith('SQLITE_CONSTRAINT')) return res.status(400).json({ error: 'The data violates a database rule: ' + err.message });
+    if (err.code === '22P02' || err.code === '22007' || err.code === '22008') return res.status(400).json({ error: 'A value has the wrong format' });
+    if (err.code === '23505') return res.status(409).json({ error: 'This record already exists' });
+    if (['23503', '23514', '23502'].includes(err.code)) return res.status(400).json({ error: 'The data violates a database rule: ' + err.message });
     console.error(err);
     res.status(500).json({ error: 'Something went wrong on the server' });
   });

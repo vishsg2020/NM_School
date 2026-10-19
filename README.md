@@ -2,187 +2,193 @@
 
 A web app for running the online school: pre-test candidates, assessments, admissions, Advance/Final fees, teacher configuration, class scheduling, class activity and reports. It has three roles: **Manager**, **Sales Team** and **Teacher**.
 
-Built from *Nalla Malayalam School Management BA v2*, the roles and flow diagrams, and the web-app development prompt. The `nm-school.html` prototype wasn't supplied, so this is a fresh build.
+**How it runs (about ₹750/month, or ₹0 on Netlify's Free plan):**
+
+- **Netlify** serves the web pages and runs the API as one Netlify Function.
+- **Supabase (Free plan)** stores the data in Postgres.
+- Database changes (migrations) are applied automatically on every production deploy.
+- A weekly GitHub Action backs up the database, because Supabase Free has no automatic backups.
 
 ---
 
-## 1. Quick start
+## 1. Set up Supabase (the database)
 
-Requires Node.js 20 or later.
+1. Create a free account at supabase.com → **New project**.
+   - **Region: East US (Ohio).** Netlify runs the API in Ohio on the Free and Personal plans, so this keeps database calls fast.
+   - Save the database password somewhere safe.
+2. When the project is ready, open **Connect** (top bar) → **Connection string** → **Transaction pooler** (port **6543**). Copy the URI. It looks like:
+   `postgresql://postgres.<project-ref>:<password>@aws-0-us-east-2.pooler.supabase.com:6543/postgres`
+   Put your password in place of `[YOUR-PASSWORD]`. If the password has symbols like `@ # % /`, percent-encode them, or pick a password with only letters and numbers.
+3. *(Recommended)* Turn on verified TLS:
+   - In Supabase, open **Project Settings → Database → SSL Configuration** and choose **Download certificate**.
+   - Commit the file to the repository as **`db/ca.crt`**. It's a public certificate, not a secret.
+   - Without it, the connection is still encrypted, but the server's identity isn't checked.
+4. *(Optional)* In **Project Settings → Data API**, turn the Data API off; the app doesn't use it. Even if it stays on, migration `0002` blocks it from reading or changing any table.
+
+You don't need to create tables. The first production deploy runs the migrations.
+
+## 2. Deploy to Netlify
+
+1. **Push this folder to a new private GitHub repository.** Don't commit `data/`, `.env` or any `*.db` file; `.gitignore` excludes them.
+2. In Netlify: **Add new project → Import an existing project →** pick the repository. Leave the build settings alone; they come from `netlify.toml`:
+   - Production deploys run `npm test && npm run migrate`. That's the 14 acceptance tests, then any new database migrations. A failure stops the deploy, so the live site never runs against the wrong database schema.
+   - Publish directory `public`; functions in `netlify/functions`.
+3. **Before the first deploy**, add these under *Project configuration → Environment variables*:
+
+   | Variable | Value | Scopes |
+   |---|---|---|
+   | `DATABASE_URL` | the Supabase transaction-pooler URI from step 1.2 | Builds **and** Functions |
+   | `INITIAL_MANAGER_EMAIL` | the first Manager's email | Functions |
+   | `INITIAL_MANAGER_PASSWORD` | a strong temporary password (8+ characters) | Functions |
+   | `INITIAL_MANAGER_NAME` | the Manager's name (optional) | Functions |
+
+   - Mark `DATABASE_URL` and `INITIAL_MANAGER_PASSWORD` as **secret**.
+   - **Don't set `NODE_ENV=production`.** It makes Netlify skip the packages the test step needs. The app detects Netlify itself and uses HTTPS-only cookies.
+4. **Deploy.** The build log should end with `Applied 0001_init.sql`, `Applied 0002_lock_down_data_api.sql`.
+5. Open the site and sign in as the Manager. Change the password (**Change password** in the sidebar). Then **delete `INITIAL_MANAGER_PASSWORD`** from Netlify; it's only used while the database has no users.
+6. As the Manager, add teachers (**Teachers**), then logins for teachers and the Sales Team (**Users**).
+
+**Deploy previews share the live database.** Netlify builds a preview for every pull request, and with one `DATABASE_URL` that preview reads and writes real school data. Pick one:
+- In *Project configuration → Build & deploy → Deploy Previews*, set previews to **None**.
+- Or create a second free Supabase project for testing and give `DATABASE_URL` a different value for the **Deploy Previews** context.
+
+### Netlify plan
+
+- **Personal ($9/month) is recommended.** If credits run out you can top up, instead of the site going offline.
+- The **Free** plan (300 credits a month) also covers this app's expected traffic if you deploy only a few times a month (each production deploy costs 15 credits). But Free is a hard limit: if it's used up, Netlify shows "Site not available" until the next month.
+
+### Optional: automatic weekly backup (GitHub Actions)
+
+`.github/workflows/backup.yml` exports every table to JSON every Sunday at 02:00 IST and keeps each copy for 90 days as a private workflow artifact.
+
+To turn it on:
+1. In the GitHub repository, open **Settings → Secrets and variables → Actions** and add a secret named `DATABASE_URL` with the same value as in Netlify.
+2. To verify it, run the workflow once from the **Actions** tab.
+
+The weekly run also counts as activity, so the free Supabase project is never paused for a week of inactivity, for example over a holiday.
+
+---
+
+## 3. How it fits together
+
+```
+Browser ──► Netlify CDN: public/ (index.html, js/, styles.css, fonts/)
+        └─► /api/*  ──rewrite──► Netlify Function netlify/functions/api.js (Express app, US East – Ohio)
+                                     └─► Supabase Postgres via the transaction pooler (port 6543, TLS)
+```
+
+| Path | Purpose |
+|---|---|
+| `netlify.toml` | Build commands, `/api/*` rewrite, single-page-app fallback, security headers (CSP, HSTS, no-index) |
+| `netlify/functions/api.js` | Wraps the Express app with `serverless-http`; opens a small connection pool per request and closes it afterwards |
+| `db/migrations/` | Schema files, applied in name order by `npm run migrate`. **Never edit an applied file; add `0003_….sql`.** Applied files are recorded in the `schema_migrations` table. |
+| `db/ca.crt` | *(optional)* Supabase root certificate for verified TLS |
+| `src/` | The API: `db.js` (Postgres adapter and connection), `migrate.js`, `auth.js`, `audit.js`, `routes/*.js` |
+| `public/` | The web app (plain ES modules, self-hosted fonts, no build step) |
+| `server.js` | Local server for development (not used on Netlify) |
+| `scripts/` | `migrate.js`, `backup.js` (JSON export), `seed-demo.js` (sample data), `bootstrap.js` (first Manager) |
+| `.github/workflows/backup.yml` | Weekly backup |
+| `test/acceptance.test.js` | 14 API acceptance tests on a real local Postgres |
+
+**Security:**
+
+- Role checks run in the function on every API call.
+- Sessions use an httpOnly, Secure, SameSite cookie, and only a hash of the token is stored.
+- Sign-in throttling is stored in the database.
+- State-changing calls need JSON plus the `X-Requested-With` header (CSRF defence).
+- Strict Content-Security-Policy and HSTS; search engines are told not to index the site.
+- The database is reached only through TLS.
+- Supabase's automatic Data API is blocked by row-level security on every table.
+
+---
+
+## 4. Local development
 
 ```bash
 npm install
-cp .env.example .env          # then set INITIAL_MANAGER_EMAIL and INITIAL_MANAGER_PASSWORD
-npm start                     # http://localhost:3000
+npm start                 # http://localhost:3000 with a local Postgres stored in ./data/pg (nothing to install)
+npm test                  # 14 acceptance tests on a fresh in-memory Postgres
+npm run seed:demo         # sample data (fictional) in ./data/demo-pg, then:
+LOCAL_DB_DIR=./data/demo-pg npm start
+#   manager@demo.local / sales1@demo.local / teacher@demo.local — password: demo-password
 ```
 
-On first start the app creates the first Manager from the two `INITIAL_MANAGER_*` variables. Remove the password from `.env` after that. The Manager then adds teachers (**Teachers**) and logins (**Users**).
+For the first local Manager, put `INITIAL_MANAGER_EMAIL` and `INITIAL_MANAGER_PASSWORD` in `.env` (copy `.env.example`). To run locally against Supabase instead, set `DATABASE_URL` in `.env`.
 
-**Try it with sample data** (fictional names, kept in a separate file):
-
-```bash
-npm run seed:demo
-DATABASE_PATH=./data/demo.db npm start
-# manager@demo.local / sales1@demo.local / teacher@demo.local — password: demo-password
-```
-
-**Run the tests:** `npm test`
+**Run migrations by hand** (e.g. before the first deploy, or if a deploy's migration step failed):
+`DATABASE_URL="<supabase uri>" npm run migrate`
 
 ---
 
-## 2. Architecture
+## Backups and restore
 
-| Layer | Choice | Why |
-|---|---|---|
-| Server | Node.js + Express 5 | Small, well known, easy to host |
-| Database | SQLite (better-sqlite3, WAL mode) | One file, real foreign keys and transactions, simple backups |
-| Auth | bcrypt passwords, random session token in an httpOnly SameSite cookie, only the hash stored | No third-party dependency |
-| Frontend | Plain ES modules, no build step, self-hosted fonts | Nothing to compile; strict Content-Security-Policy |
-
-```
-server.js               entry point (loads .env, opens DB, creates first Manager)
-src/db.js               schema + numbered migrations (PRAGMA user_version)
-src/auth.js             login, sessions, role middleware, throttling
-src/audit.js            audit log helper (old/new values, user, time, reason)
-src/routes/*.js         API modules: users, teachers, candidates (+results), admissions (+enrollments,
-                        payments, students), classes (+calendar), reports (+dashboard)
-public/                 the web app (index.html, styles.css, js/core.js, js/app.js, js/pages/*)
-scripts/                backup.js, seed-demo.js, bootstrap.js, load-env.js
-test/acceptance.test.js API acceptance tests
-```
-
-**Security measures**
-
-- Every API route checks the role on the server, not only in the UI.
-- State-changing calls must send JSON with an `X-Requested-With` header, as a CSRF defence.
-- Strict CSP with no inline scripts or styles.
-- Login is throttled after repeated failures.
-- Deactivating a user or teacher ends their sessions immediately.
-- Teachers never receive parent phone numbers or fee data.
-- Secrets live only in environment variables.
+- **Weekly:** the GitHub Action above. **On demand:** `DATABASE_URL="<supabase uri>" npm run backup` writes a consistent JSON export of every table to `./backups/` and keeps the newest 30.
+- Backups contain children's names and parents' phone numbers. Keep them private.
+- Supabase's paid Pro plan ($25/month) adds daily backups with point-in-time restore. That's worth it once the school relies on the system every day.
+- No restore script is included. Restoring from the JSON export is a manual job.
 
 ---
 
-## 3. Data model
+## 5. Roles
 
-`users` · `sessions` · `teachers` · `teacher_hours` (working hours) · `teacher_slots` (availability windows) · `candidates` (Lead ID, unique) · `pretest_results` (one per candidate) · `students` (one per candidate, created on a Confirmed result) · `enrollments` · `payments` (unique per enrollment + stage) · `classes` (one row per student per class; a 3:1 group = up to 3 rows sharing teacher and time) · `audit_events`
-
-Key integrity rules enforced in the database:
-
-- Lead ID is unique (case-insensitive).
-- Each candidate has one result and at most one student record.
-- A student can have only **one Active enrollment** (partial unique index).
-- Payment stage is `Advance` or `Final`, with one of each per enrollment.
-- `completed_classes ≤ total_classes`.
-- Every link is a foreign key, and indexes cover all filter columns.
-- The enrollment stores a snapshot of the **Lead ID and Assigned Sales Representative** for attribution.
-
----
-
-## 4. Roles and module map
-
-| Module (route) | Manager | Sales Team | Teacher |
+| Module | Manager | Sales Team | Teacher |
 |---|---|---|---|
-| Dashboard `#/dashboard` | Full metrics, each linked to its records | Own leads + queue metrics | Own classes and pre-tests |
-| Pre-Test Queue `#/pretests` | All; add/edit; assign teacher | **All candidates** (decision confirmed); add/edit timing, confirmation, details | Assigned only, no phone numbers |
-| Pre-Test Result `#/candidate/:id` | Record/edit; mark reviewed | View | Record/edit own until the Manager reviews it |
-| Admissions `#/admissions` | Yes | — | — |
-| Students `#/students` | All | — | Own students (no fees) |
-| Payments `#/payments` | Yes | — | — |
-| Calendar `#/calendar` | Any teacher | — | Own |
-| Class Activity `#/classes` | All; correct completed classes | — | Own classes |
-| Teachers `#/teachers` | Add/edit/deactivate; hours, slots, formats, capacity | — | — |
-| Reports `#/reports` | Yes | — | — |
-| Users `#/users` | Yes | — | — |
+| Dashboard | Full, every number linked to its records | Own leads + queue | Own classes and pre-tests |
+| Pre-Test Queue | All; add/edit; assign teacher | All candidates; add/edit timing, confirmation, details | Assigned only, no phone numbers |
+| Pre-test result | Record/edit; mark reviewed | View | Record/edit own until reviewed |
+| Admissions, Payments, Teachers, Reports, Users | Yes | — | — |
+| Students | All | — | Own students, no fees |
+| Calendar, Class Activity | All | — | Own |
 
 ---
 
-## 5. How the business rules are implemented
+## 6. Business rules
 
-| Rule | Implementation |
-|---|---|
-| No spreadsheet sync | There is no import/sync code anywhere. Candidates are entered by hand by Sales or the Manager. |
-| Duplicate candidates | Each form has a one-time request key, so a double click returns the same record. The same student name **and** the same phone number triggers a warning, and you can still choose to save. Siblings sharing a phone are allowed. |
-| Pre-Test Queue filters | Test date, teacher (including Unassigned), status, time confirmation, sales rep and search. Filters combine with AND, sit in the URL so dashboard links open pre-filtered, and **Clear filters** restores the full list. |
-| Assessment | Keeps the Lead ID and sales rep from the candidate. **Confirmed** creates the Student and **no** enrollment. Follow-up sets the candidate to Follow-up; Confirmed and Not Interested set it to Completed. |
-| Admission | Creates one enrollment plus exactly two payments (Advance, Final) in a single transaction. Repeat clicks are blocked by the request key and the one-active-enrollment index. |
-| Advance + Final = Total | Checked **only on Save**, in the browser and on the server, with a message such as "Advance ₹1,000 + Final ₹1 = ₹1,001, which is ₹1,499 less than the Total Course Fee of ₹2,500". Nothing is flagged while you type. |
-| Money totals | Total Paid = sum of Paid payments. Outstanding = fee − Paid. Pending = sum of Pending payments. Overdue = Pending with a due date **before** today (IST); a payment due today is not overdue. |
-| Payment edits | Every change is written to the audit history with old and new values, the user and the time. Amounts change only through **Edit fee plan**, which keeps the sum equal to the fee and requires a reason. Moving a payment from Paid back to Pending also requires a reason. |
-| Class completion | A `counted` flag is flipped inside the same transaction that changes `completed_classes`, so repeated or simultaneous submissions count once. Cancelled, absent and rescheduled classes don't count. Only the Manager can undo a completion, and that decrements once. A class can't be completed before its date or without Present/Late attendance. |
-| Scheduling | **Blocks:** inactive teacher, unsupported format, a 1:1 overlap, a full 3:1 group (3 students), or a student double-booked. **Warns, and you must confirm:** outside working hours, outside availability slots, over monthly capacity, before the start date, or more classes booked than remain. |
-| Teacher deactivation | Shows the teacher's active enrollments, upcoming classes and open pre-tests, and asks for confirmation. The teacher can't sign in afterwards. There is no limit on the number of teachers. |
-
----
-
-## 6. Decisions that need your confirmation
-
-I chose sensible defaults for these. Each is easy to change.
-
-1. **Capacity definition.** Monthly capacity counts *teaching sessions* (one teacher time slot; a 3:1 group with three students is one session). Going over capacity only warns.
-2. **3:1 group, absent student.** A student marked absent doesn't use up a class from their package. The group session still counts as conducted for the teacher (the "Completed 3:1 sessions" report input) if at least one student attended.
-3. **Time-confirmation values.** These are Not Confirmed, Confirmed and Reschedule Requested. The documents name the field but not its values.
-4. **Result locking.** A teacher can edit their result until the Manager marks it reviewed. "Needs Review" stays a status the Manager sets by hand.
-5. **Renewals.** One Active enrollment per student. A second course after one finishes (a renewal) isn't built yet. Today it would need the Manager to mark the first enrollment Completed, and the admission screen only lists students with no enrollment.
-6. **Enrollment completion.** When remaining classes reach 0, the enrollment is not closed automatically. It shows 0 remaining, and the Manager sets it to Completed.
-7. **Timezone.** All times are IST. Families abroad see IST times, and their local time isn't stored.
-8. **Fee helper.** The rates come from the fee PDF: 1:1 ₹250, weekend 1:1 ₹350, 3:1 ₹150, +₹50 outside 9 AM–9 PM. Video on Demand and Star Teacher fees are entered by hand. The Manager always confirms the total.
-9. **Pay and incentives.** Reports show the *inputs* only: completed 1:1 classes, 3:1 sessions and teacher absences per teacher, and collected payments per sales rep. Pay itself isn't calculated, as agreed.
-10. **Default class lengths.** 30 min (1:1) and 40 min (3:1), editable per booking.
-11. **Payment methods.** UPI, Bank Transfer, Cash, Card, Other.
+- **Candidate entry:**
+  - Sales or the Manager enter every candidate by hand; there's no spreadsheet sync.
+  - Repeat clicks never create duplicates.
+  - The same name *and* phone number gives a warning, but siblings sharing a phone are allowed.
+- **Pre-Test Queue filters:** test date, teacher (including Unassigned), status, time confirmation, sales rep and search. They combine, live in the URL, and **Clear filters** restores everything.
+- **Assessment:**
+  - Keeps the Lead ID and the Assigned Sales Representative.
+  - A **Confirmed** result creates the Student, but no enrollment until the Manager completes admission setup.
+- **Admission:** creates exactly one enrollment plus the Advance and Final payments, in one transaction. Advance + Final = Total fee is checked **only on Save** and explains the difference.
+- **Money:**
+  - Total Paid = Paid payments.
+  - Outstanding = fee − Paid.
+  - Pending = Pending payments.
+  - Overdue = Pending with a due date *before* today (IST).
+  - Every payment change goes into the audit history with old and new values, the user and the time.
+- **Classes:**
+  - Completing a class counts once. The class row is locked during the update, so repeated or simultaneous submissions can't double-count.
+  - Cancelled or absent classes don't count.
+  - 1:1 allows one student per slot; 3:1 allows up to three.
+  - Conflicts block a booking; going outside working hours or over capacity only warns.
+  - Simultaneous bookings for the same teacher are handled one at a time.
 
 ---
 
-## 7. Test results
+## 7. Decisions still to confirm
 
-`npm test` runs 14 API acceptance tests, all passing. They cover:
-
-- unauthenticated and cross-site requests are rejected;
-- teacher add/edit/deactivate and availability/capacity configuration;
-- Manager and Sales add candidates, with idempotent repeat submits and a duplicate warning that allows siblings;
-- timing and confirmation updates, with server-side role checks;
-- every Pre-Test Queue filter alone and combined, and clearing them;
-- the assessment keeps the Lead ID and rep, and creates a student but no enrollment;
-- the admission mismatch error appears only on a real mismatch, and one enrollment plus Advance/Final is created with no duplicates;
-- Paid/Pending/Overdue totals, including the due-today edge case, plus the payment audit history;
-- scheduling conflicts and warnings, the 1:1 limit and the 3:1 limit of three;
-- class completion counts once, including concurrent submissions, and a Manager correction undoes it once;
-- the Class Activity student filter;
-- dashboard and report totals match the underlying records;
-- teacher deactivation blocks sign-in.
-
-A browser test (Playwright, desktop and 390 px mobile) also ran the whole journey through the UI:
-
-1. Sales adds a candidate (a double click creates one), and the queue filters work alone and combined.
-2. The Manager assigns a teacher.
-3. The teacher records the result.
-4. The Manager saves the admission: no error while typing, the error only on Save, and the save succeeds after fixing the amounts.
-5. The Manager schedules a class.
-6. The class is completed twice and the count goes up once.
-7. There is no horizontal scrolling on mobile, and there were no page errors.
+1. **Capacity** is counted in monthly teaching *sessions*, where a 3:1 group counts once. Going over only warns.
+2. **3:1 absentee.** A student marked absent doesn't use up a package class.
+3. **Time-confirmation values** are Not Confirmed, Confirmed and Reschedule Requested.
+4. **Result editing.** A teacher can edit a result until the Manager marks it reviewed.
+5. **Renewals.** A second course after the first one finishes isn't built yet; each student has one Active enrollment.
+6. **Enrollment completion.** Enrollments aren't closed automatically when 0 classes remain.
+7. **Timezone.** All times are IST.
+8. **Fee helper rates.** ₹250 1:1 / ₹350 weekend 1:1 / ₹150 3:1 / +₹50 outside 9 AM–9 PM. The Manager always confirms the total.
+9. **Pay.** Reports show pay *inputs* only; pay itself isn't calculated.
+10. **Class lengths.** Defaults are 30 min (1:1) and 40 min (3:1), editable per booking.
 
 ---
 
-## 8. Deployment
+## 8. What was tested before handover
 
-Any host that runs Node and gives you a **persistent disk** works: a small VPS, Render with a disk, Railway with a volume, or Fly.io with a volume.
-
-1. Set the environment variables from `.env.example`:
-   - `NODE_ENV=production`
-   - `DATABASE_PATH` pointing at the persistent disk
-   - `TRUST_PROXY=1` behind a proxy or load balancer
-   - the `INITIAL_MANAGER_*` variables for the first start only
-2. Serve the app **over HTTPS**. Production cookies are Secure-only, so it won't work over plain HTTP. Hosted platforms provide HTTPS. On a VPS, put Caddy or nginx with Let's Encrypt in front of `localhost:3000`.
-3. Keep it running with systemd or pm2 (`pm2 start server.js --name nm-school`).
-4. Upgrades: `git pull && npm ci && restart`. Schema migrations run automatically at start-up. Take a backup first.
-
-**Backups**
-
-- `npm run backup` writes a consistent online copy to `BACKUP_DIR`, checks its integrity and keeps the newest `BACKUP_KEEP` copies. It's safe to run while the app is in use.
-- Schedule it daily, for example with cron: `15 2 * * * cd /srv/nm-school && npm run backup`.
-- Also copy the backup folder off the server (for example with rclone to Google Drive or S3). A backup on the same disk doesn't protect against losing that disk.
-- To restore: stop the app, replace the database file with a backup, and start the app.
-
-**Personal data**
-
-The app stores children's names and ages, parents' phone numbers and payment references. Limit Manager accounts, use strong passwords, deactivate accounts when people leave, and keep backups private.
+- **Acceptance tests:** all 14 pass on PostgreSQL 17, including the concurrent class-completion test.
+- **Migration runner:** applies `0001` and `0002` once, and a second run changes nothing.
+- **Data API lock-down:** row-level security is on for all 14 tables. A Supabase-style API role sees 0 rows, while the app's own connection sees all of them.
+- **Netlify's bundler:** it packaged the function (1.4 MB) with the optional certificate file. The packaged function ran from an unrelated folder using only `DATABASE_URL`: first Manager created, Secure cookie, Dashboard, Reports, Teachers, Pre-Test Queue, and adding a candidate.
+- **Connection settings:** a Supabase URL gets encrypted TLS, which switches to certificate-verified once `db/ca.crt` (or `DATABASE_CA_CERT`) is supplied. A localhost URL gets no TLS.
+- **Browser workflow (desktop and phone width):** Sales adds a candidate (one record on double-click) and the queue filters are checked; the Manager assigns a teacher; the teacher records the result; the Manager saves the admission (error only on Save); the Manager schedules a class; completing the class twice counts once.
+- **Not tested from here:** a live Supabase project or a live Netlify deploy, since neither account is reachable from this workspace. Do one click-through of the main screens after the first deploy.
