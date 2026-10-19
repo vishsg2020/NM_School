@@ -4,6 +4,7 @@ const { audit, history } = require('../audit');
 const { isUniqueViolation } = require('../db');
 const {
   bad, notFound, forbidden, conflict, str, int, oneOf, bool, isValidDateTime, isValidDate, normPhone, normName, idParam,
+  addMinutes, weekdayOf,
 } = require('../util');
 
 const STATUSES = ['Scheduled', 'Time Required', 'Needs Review', 'Completed', 'Cancelled', 'Follow-up'];
@@ -11,6 +12,10 @@ const SALES_STATUSES = ['Scheduled', 'Time Required', 'Follow-up', 'Cancelled'];
 const CONFIRMATIONS = ['Not Confirmed', 'Confirmed', 'Reschedule Requested'];
 const COURSES = ['Starter', 'Reader', 'Writer', 'Malayalam Master'];
 const ADMISSION = ['Confirmed', 'Follow-up', 'Not Interested'];
+const GENDERS = ['Male', 'Female', 'Prefer not to say'];
+const RELATIONSHIPS = ['Mother', 'Father', 'Guardian', 'Other'];
+const ADULT_AGE = 18;
+const PRETEST_MINUTES = 30; // assumed pre-test length, used for the teacher clash check
 
 const SELECT = `
   SELECT c.*, r.name AS sales_rep_name, t.name AS teacher_name, t.active AS teacher_active,
@@ -25,7 +30,7 @@ const SELECT = `
 
 // Teachers only see what they need to run the pre-test.
 function redactForTeacher(c) {
-  const { phone, phone_norm, idempotency_key, ...rest } = c;
+  const { phone, phone_norm, student_phone, idempotency_key, ...rest } = c;
   return rest;
 }
 
@@ -54,6 +59,60 @@ async function validateTeacher(db, id) {
 async function findDuplicates(db, phoneNorm, studentName, excludeId = 0) {
   const rows = await db.all('SELECT id, lead_id, student_name, status FROM candidates WHERE phone_norm = ? AND id <> ?', [phoneNorm, excludeId]);
   return rows.filter(d => normName(d.student_name) === normName(studentName));
+}
+
+
+function splitName(full) {
+  const s = String(full || '').trim().replace(/\s+/g, ' ');
+  const i = s.indexOf(' ');
+  return i < 0 ? [s, null] : [s.slice(0, i), s.slice(i + 1)];
+}
+
+/**
+ * Reads the student's and parent's details into `c`.
+ * The form sends first_name + last_name; older clients may still send student_name (split on the first space).
+ * Returns true when the request touched these details, so the age-based rules must be checked.
+ */
+function readPerson(b, c, { creating }) {
+  let touched = creating;
+  if (b.first_name !== undefined || b.last_name !== undefined) {
+    c.first_name = str(b.first_name, { required: true, name: 'First name', max: 60 });
+    c.last_name = str(b.last_name, { required: true, name: 'Last name', max: 60 });
+    touched = true;
+  } else if (b.student_name !== undefined || creating) {
+    [c.first_name, c.last_name] = splitName(str(b.student_name, { required: true, name: 'Student name', max: 100 }));
+    touched = true;
+  }
+  c.student_name = [c.first_name, c.last_name].filter(Boolean).join(' ');
+  if (b.age !== undefined) { c.age = int(b.age, { min: 2, max: 99, name: 'Age' }); touched = true; }
+  if (b.gender !== undefined) c.gender = oneOf(b.gender, GENDERS, { name: 'Gender' });
+  if (b.parent_name !== undefined) c.parent_name = str(b.parent_name, { name: 'Parent name', max: 100 });
+  if (b.parent_relationship !== undefined) c.parent_relationship = oneOf(b.parent_relationship, RELATIONSHIPS, { name: 'Relationship' });
+  if (b.student_phone !== undefined) {
+    c.student_phone = str(b.student_phone, { name: 'Student phone', max: 30 });
+    const n = normPhone(c.student_phone);
+    if (c.student_phone && (n.length < 6 || n.length > 15)) throw bad('Enter a valid student phone number (6–15 digits)', { field: 'Student phone' });
+  }
+  if (b.phone !== undefined || creating) {
+    const minor = c.age != null && c.age < ADULT_AGE;
+    const label = minor ? 'Parent phone' : 'Phone';
+    c.phone = str(b.phone, { required: true, name: label, max: 30 });
+    c.phone_norm = normPhone(c.phone);
+    if (c.phone_norm.length < 6 || c.phone_norm.length > 15) throw bad(`Enter a valid ${label.toLowerCase()} number (6–15 digits, country code allowed)`, { field: label });
+  }
+  return touched;
+}
+
+/** Age decides which contact details are required. */
+function checkPersonRules(c) {
+  if (c.age == null) throw bad('Age is required', { field: 'Age' });
+  if (c.age < ADULT_AGE) {
+    if (!c.parent_name) throw bad('Parent name is required for a student under 18', { field: 'Parent name' });
+    if (!c.parent_relationship) throw bad('Relationship is required for a student under 18', { field: 'Relationship' });
+  } else {
+    // An adult's own number is the main phone; there is no separate student phone.
+    c.student_phone = null;
+  }
 }
 
 module.exports = (app, { db }) => {
@@ -120,20 +179,18 @@ module.exports = (app, { db }) => {
     if (earlier) return res.status(200).json(earlier);
 
     const c = {
-      student_name: str(b.student_name, { required: true, name: 'Student name', max: 100 }),
-      parent_name: str(b.parent_name, { name: 'Parent name', max: 100 }),
-      phone: str(b.phone, { required: true, name: 'Phone', max: 30 }),
+      first_name: null, last_name: null, gender: null, parent_name: null, parent_relationship: null, student_phone: null, age: null,
       location: str(b.location, { name: 'Location', max: 100 }),
-      age: int(b.age, { min: 2, max: 99, name: 'Age' }),
       sales_rep_id: int(b.sales_rep_id, { min: 1, name: 'Assigned Sales Representative' }) || req.user.id,
       pretest_at: str(b.pretest_at, { name: 'Pre-test date/time', max: 16 }),
       time_confirmation: oneOf(b.time_confirmation || 'Not Confirmed', CONFIRMATIONS, { name: 'Time confirmation' }),
       pretest_teacher_id: null,
       notes: str(b.notes, { name: 'Notes', max: 2000 }),
     };
-    c.phone_norm = normPhone(c.phone);
-    if (c.phone_norm.length < 6 || c.phone_norm.length > 15) throw bad('Enter a valid phone number (6–15 digits, country code allowed)', { field: 'Phone' });
+    readPerson(b, c, { creating: true });
+    checkPersonRules(c);
     if (c.pretest_at && !isValidDateTime(c.pretest_at)) throw bad('Pre-test date/time is not valid', { field: 'Pre-test date/time' });
+    if (c.time_confirmation === 'Confirmed' && !c.pretest_at) throw bad('A confirmed pre-test needs a date and time', { field: 'Date' });
     await validateSalesRep(db, c.sales_rep_id);
     if (b.pretest_teacher_id) {
       if (req.user.role !== 'manager') throw forbidden();
@@ -164,9 +221,11 @@ module.exports = (app, { db }) => {
     try {
       id = await db.tx(async t => {
         c.lead_id = leadId || (await nextLeadId(t));
-        const r = await t.get(`INSERT INTO candidates (lead_id, student_name, parent_name, phone, phone_norm, location, age,
+        const r = await t.get(`INSERT INTO candidates (lead_id, student_name, first_name, last_name, gender, parent_name,
+          parent_relationship, phone, phone_norm, student_phone, location, age,
           sales_rep_id, pretest_at, time_confirmation, pretest_teacher_id, status, notes, idempotency_key, created_by)
-          VALUES (@lead_id, @student_name, @parent_name, @phone, @phone_norm, @location, @age, @sales_rep_id, @pretest_at,
+          VALUES (@lead_id, @student_name, @first_name, @last_name, @gender, @parent_name,
+          @parent_relationship, @phone, @phone_norm, @student_phone, @location, @age, @sales_rep_id, @pretest_at,
           @time_confirmation, @pretest_teacher_id, @status, @notes, @key, @by) RETURNING id`, { ...c, key, by: req.user.id });
         await audit(t, req.user, 'candidate', r.id, 'created', null, c);
         return r.id;
@@ -185,15 +244,8 @@ module.exports = (app, { db }) => {
     const b = req.body;
     const isMgr = req.user.role === 'manager';
     const c = { ...before };
-    if (b.student_name !== undefined) c.student_name = str(b.student_name, { required: true, name: 'Student name', max: 100 });
-    if (b.parent_name !== undefined) c.parent_name = str(b.parent_name, { name: 'Parent name', max: 100 });
-    if (b.phone !== undefined) {
-      c.phone = str(b.phone, { required: true, name: 'Phone', max: 30 });
-      c.phone_norm = normPhone(c.phone);
-      if (c.phone_norm.length < 6 || c.phone_norm.length > 15) throw bad('Enter a valid phone number', { field: 'Phone' });
-    }
+    if (readPerson(b, c, { creating: false })) checkPersonRules(c);
     if (b.location !== undefined) c.location = str(b.location, { name: 'Location', max: 100 });
-    if (b.age !== undefined) c.age = int(b.age, { min: 2, max: 99, name: 'Age' });
     if (b.notes !== undefined) c.notes = str(b.notes, { name: 'Notes', max: 2000 });
     if (b.sales_rep_id !== undefined) {
       c.sales_rep_id = int(b.sales_rep_id, { min: 1, required: true, name: 'Assigned Sales Representative' });
@@ -226,12 +278,45 @@ module.exports = (app, { db }) => {
       if (d.length) throw conflict(`Another candidate (${d[0].lead_id}) has the same name and phone.`, { code: 'POSSIBLE_DUPLICATE', duplicates: d });
     }
     await db.tx(async t => {
-      await t.run(`UPDATE candidates SET student_name=@student_name, parent_name=@parent_name, phone=@phone, phone_norm=@phone_norm,
-        location=@location, age=@age, sales_rep_id=@sales_rep_id, pretest_at=@pretest_at, time_confirmation=@time_confirmation,
+      await t.run(`UPDATE candidates SET student_name=@student_name, first_name=@first_name, last_name=@last_name, gender=@gender,
+        parent_name=@parent_name, parent_relationship=@parent_relationship, phone=@phone, phone_norm=@phone_norm,
+        student_phone=@student_phone, location=@location, age=@age, sales_rep_id=@sales_rep_id, pretest_at=@pretest_at, time_confirmation=@time_confirmation,
         pretest_teacher_id=@pretest_teacher_id, status=@status, notes=@notes, updated_at=now_iso() WHERE id=@id`, c);
       await audit(t, req.user, 'candidate', before.id, 'updated', before, c, str(b.reason, { max: 500 }));
     });
     res.json(await byId(before.id));
+  });
+
+  // ---------- Teacher clash check for a pre-test time (warning only, never blocks) ----------
+  app.get('/api/pretest-clash', requireRole('manager'), async (req, res) => {
+    const q = req.query;
+    const teacherId = idParam(q.teacher);
+    const at = String(q.at || '');
+    if (!isValidDateTime(at)) throw bad('Choose a valid pre-test date and time');
+    const teacher = await db.get('SELECT id, name, active FROM teachers WHERE id = ?', [teacherId]);
+    if (!teacher) throw notFound('Teacher');
+    const end = addMinutes(at, PRETEST_MINUTES);
+    const date = at.slice(0, 10);
+    const overlaps = (s, mins) => s < end && at < addMinutes(s, mins);
+    const busy = [];
+    const classes = await db.all(`SELECT cl.class_code, cl.scheduled_at, cl.duration_min, c.student_name
+      FROM classes cl JOIN enrollments e ON e.id = cl.enrollment_id JOIN students s ON s.id = e.student_id
+      JOIN candidates c ON c.id = s.candidate_id
+      WHERE cl.teacher_id = ? AND substr(cl.scheduled_at,1,10) = ? AND cl.status NOT IN ('Cancelled','Rescheduled')`, [teacherId, date]);
+    for (const r of classes) if (overlaps(r.scheduled_at, r.duration_min))
+      busy.push({ kind: 'Class', code: r.class_code, student_name: r.student_name, start: r.scheduled_at, end: addMinutes(r.scheduled_at, r.duration_min) });
+    const pretests = await db.all(`SELECT id, lead_id, student_name, pretest_at FROM candidates
+      WHERE pretest_teacher_id = ? AND substr(pretest_at,1,10) = ? AND status <> 'Cancelled' AND id <> ?`,
+    [teacherId, date, q.candidate ? idParam(q.candidate) : 0]);
+    for (const r of pretests) if (overlaps(r.pretest_at, PRETEST_MINUTES))
+      busy.push({ kind: 'Pre-test', code: r.lead_id, student_name: r.student_name, start: r.pretest_at, end: addMinutes(r.pretest_at, PRETEST_MINUTES) });
+    const warnings = [];
+    if (!teacher.active) warnings.push(`${teacher.name} is inactive`);
+    const hours = await db.all('SELECT start_time, end_time FROM teacher_hours WHERE teacher_id = ? AND weekday = ?', [teacherId, weekdayOf(at)]);
+    const st = at.slice(11); const et = end.slice(11);
+    if (end.slice(0, 10) !== date || !hours.some(h => h.start_time <= st && et <= h.end_time)) warnings.push('outside working hours');
+    busy.sort((a, b) => a.start.localeCompare(b.start));
+    res.json({ teacher: teacher.name, minutes: PRETEST_MINUTES, busy, warnings });
   });
 
   // ---------- Pre-Test Result ----------
@@ -300,3 +385,4 @@ module.exports = (app, { db }) => {
 };
 
 module.exports.COURSES = COURSES;
+module.exports.PRETEST_MINUTES = PRETEST_MINUTES;

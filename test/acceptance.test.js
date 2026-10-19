@@ -89,26 +89,26 @@ test('Manager can add, edit, deactivate teachers and configure availability/capa
 
 let candA, candB;
 test('Manager and Sales Team can add candidates; no duplicate on repeat submit', async () => {
-  let r = await S.post('/api/candidates', { student_name: 'Anu Nair', parent_name: 'Rekha', phone: '+1 (415) 555-0101', location: 'Texas', age: 8, idempotency_key: 'k-1' });
+  let r = await S.post('/api/candidates', { student_name: 'Anu Nair', parent_name: 'Rekha', parent_relationship: 'Mother', phone: '+1 (415) 555-0101', location: 'Texas', age: 8, idempotency_key: 'k-1' });
   assert.equal(r.status, 201, JSON.stringify(r.data)); candA = r.data;
   assert.match(candA.lead_id, /^NM-\d{5}$/);
   assert.equal(candA.status, 'Time Required');
   assert.equal(candA.sales_rep_id, salesId);
   // same idempotency key => same record, no new row
-  r = await S.post('/api/candidates', { student_name: 'Anu Nair', phone: '+14155550101', idempotency_key: 'k-1' });
+  r = await S.post('/api/candidates', { age: 25, student_name: 'Anu Nair', phone: '+14155550101', idempotency_key: 'k-1' });
   assert.equal(r.status, 200); assert.equal(r.data.id, candA.id);
   // same name + phone with a fresh key => duplicate warning
-  r = await S.post('/api/candidates', { student_name: ' anu  nair ', phone: '14155550101', idempotency_key: 'k-2' });
+  r = await S.post('/api/candidates', { student_name: ' anu  nair ', phone: '14155550101', age: 8, parent_name: 'Rekha', parent_relationship: 'Mother', idempotency_key: 'k-2' });
   assert.equal(r.status, 409); assert.equal(r.data.code, 'POSSIBLE_DUPLICATE');
   // sibling sharing phone is allowed
-  r = await S.post('/api/candidates', { student_name: 'Arjun Nair', phone: '14155550101', idempotency_key: 'k-3', pretest_at: '2026-10-16T18:00' });
+  r = await S.post('/api/candidates', { student_name: 'Arjun Nair', phone: '14155550101', age: 10, parent_name: 'Rekha', parent_relationship: 'Mother', idempotency_key: 'k-3', pretest_at: '2026-10-16T18:00' });
   assert.equal(r.status, 201); candB = r.data; assert.equal(candB.status, 'Scheduled');
   // manager adds with supplied lead id and assigns teacher
-  r = await M.post('/api/candidates', { lead_id: 'FB-2201', student_name: 'Diya', phone: '9847000001', sales_rep_id: salesId, pretest_at: '2026-10-17T10:00', pretest_teacher_id: teacherA });
+  r = await M.post('/api/candidates', { lead_id: 'FB-2201', student_name: 'Diya', phone: '9847000001', age: 7, parent_name: 'Sita', parent_relationship: 'Mother', sales_rep_id: salesId, pretest_at: '2026-10-17T10:00', pretest_teacher_id: teacherA });
   assert.equal(r.status, 201); assert.equal(r.data.lead_id, 'FB-2201');
-  assert.equal((await M.post('/api/candidates', { lead_id: 'fb-2201', student_name: 'Zed', phone: '9847000002' })).status, 409);
+  assert.equal((await M.post('/api/candidates', { lead_id: 'fb-2201', student_name: 'Zed', phone: '9847000002', age: 30 })).status, 409);
   // teacher cannot add
-  assert.equal((await T1.post('/api/candidates', { student_name: 'X', phone: '9847000003' })).status, 403);
+  assert.equal((await T1.post('/api/candidates', { age: 25, student_name: 'X', phone: '9847000003' })).status, 403);
   assert.equal((await db.get('SELECT COUNT(*) n FROM candidates')).n, 3);
 });
 
@@ -238,7 +238,7 @@ test('Scheduling flags conflicts and capacity; 1:1 allows one student', async ()
   r = await M.post('/api/classes/check', { enrollment_id: enrollment.id, scheduled_at: '2026-10-21T19:00' });
   assert.ok(r.data.results[0].warnings.some(w => /working hours/.test(w)));
   // overlapping second 1:1 student for teacherA => hard error
-  const c2 = (await M.post('/api/candidates', { student_name: 'Meera', phone: '9000000001', pretest_teacher_id: teacherA, pretest_at: '2026-10-14T10:00' })).data;
+  const c2 = (await M.post('/api/candidates', { age: 25, student_name: 'Meera', phone: '9000000001', pretest_teacher_id: teacherA, pretest_at: '2026-10-14T10:00' })).data;
   await T1.put(`/api/candidates/${c2.id}/result`, { recommended_course: 'Starter', assessment: 'none', admission_status: 'Confirmed' });
   const s2 = (await M.get(`/api/candidates/${c2.id}`)).data.student_id;
   const e2 = (await M.post('/api/admissions', { student_id: s2, course: 'Starter', class_mode: '1:1', total_classes: 2, teacher_id: teacherA, start_date: '2026-10-01', total_fee: 500,
@@ -254,7 +254,7 @@ test('Scheduling flags conflicts and capacity; 1:1 allows one student', async ()
 
 test('3:1 allows up to three students per concurrent class', async () => {
   const mk = async (name) => {
-    const c = (await M.post('/api/candidates', { student_name: name, phone: '98' + Math.floor(Math.random() * 1e8), pretest_teacher_id: teacherA })).data;
+    const c = (await M.post('/api/candidates', { age: 25, student_name: name, phone: '98' + Math.floor(Math.random() * 1e8), pretest_teacher_id: teacherA })).data;
     await M.put(`/api/candidates/${c.id}/result`, { recommended_course: 'Writer', assessment: 'ok', admission_status: 'Confirmed' });
     const sid = (await M.get(`/api/candidates/${c.id}`)).data.student_id;
     const e = await M.post('/api/admissions', { student_id: sid, course: 'Writer', class_mode: '3:1', total_classes: 5, teacher_id: teacherA, start_date: '2026-10-01', total_fee: 750,
@@ -347,4 +347,63 @@ test('Deactivating a teacher requires confirmation when work is assigned and blo
   assert.equal(r.status, 400); assert.equal(r.data.code, 'NEEDS_CONFIRM');
   assert.equal((await M.patch(`/api/teachers/${teacherB}`, { active: true })).status, 200);
   void t;
+});
+
+test('PT-03: candidate details follow the age rules; first/last name; confirmed timing', async () => {
+  const base = { first_name: 'Meera', last_name: 'Pillai', phone: '+971 50 555 0199', location: 'Dubai' };
+  // Age is required; under 18 needs parent name + relationship
+  let r = await S.post('/api/candidates', { ...base, idempotency_key: 'pt03-1' });
+  assert.equal(r.status, 400); assert.equal(r.data.field, 'Age');
+  r = await S.post('/api/candidates', { ...base, age: 9, idempotency_key: 'pt03-2' });
+  assert.equal(r.status, 400); assert.equal(r.data.field, 'Parent name');
+  r = await S.post('/api/candidates', { ...base, age: 9, parent_name: 'Asha', idempotency_key: 'pt03-3' });
+  assert.equal(r.status, 400); assert.equal(r.data.field, 'Relationship');
+  r = await S.post('/api/candidates', { ...base, age: 9, parent_name: 'Asha', parent_relationship: 'Aunt', idempotency_key: 'pt03-4' });
+  assert.equal(r.status, 400);
+  // Phone is always required (the parent's for a child)
+  r = await S.post('/api/candidates', { first_name: 'Meera', last_name: 'Pillai', age: 9, parent_name: 'Asha', parent_relationship: 'Mother', idempotency_key: 'pt03-5' });
+  assert.equal(r.status, 400); assert.equal(r.data.field, 'Parent phone');
+  // A confirmed time needs a date and time
+  r = await S.post('/api/candidates', { ...base, age: 9, parent_name: 'Asha', parent_relationship: 'Mother', time_confirmation: 'Confirmed', idempotency_key: 'pt03-6' });
+  assert.equal(r.status, 400);
+  r = await S.post('/api/candidates', { ...base, age: 9, gender: 'Female', parent_name: 'Asha', parent_relationship: 'Mother', student_phone: '+971 50 555 0100',
+    time_confirmation: 'Confirmed', pretest_at: '2026-11-02T17:00', idempotency_key: 'pt03-7' });
+  assert.equal(r.status, 201, JSON.stringify(r.data));
+  assert.equal(r.data.student_name, 'Meera Pillai'); assert.equal(r.data.first_name, 'Meera'); assert.equal(r.data.last_name, 'Pillai');
+  assert.equal(r.data.gender, 'Female'); assert.equal(r.data.parent_relationship, 'Mother'); assert.equal(r.data.student_phone, '+971 50 555 0100');
+  assert.equal(r.data.status, 'Scheduled'); assert.equal(r.data.time_confirmation, 'Confirmed');
+  const child = r.data;
+  // Teachers never see either phone number
+  await M.patch(`/api/candidates/${child.id}`, { pretest_teacher_id: teacherA });
+  const seen = await T1.get(`/api/candidates/${child.id}`);
+  assert.equal(seen.data.phone, undefined); assert.equal(seen.data.student_phone, undefined);
+  // Adult: own phone required, no separate student phone; not confirmed => Time Required
+  r = await S.post('/api/candidates', { first_name: 'Arun', last_name: 'Kumar', age: 34, student_phone: '+44 7700 900000', time_confirmation: 'Not Confirmed', idempotency_key: 'pt03-8' });
+  assert.equal(r.status, 400); assert.equal(r.data.field, 'Phone');
+  r = await S.post('/api/candidates', { first_name: 'Arun', last_name: 'Kumar', age: 34, phone: '+44 7700 900123', student_phone: '+44 7700 900000', time_confirmation: 'Not Confirmed', idempotency_key: 'pt03-9' });
+  assert.equal(r.status, 201); assert.equal(r.data.status, 'Time Required'); assert.equal(r.data.student_phone, null);
+  // Editing names keeps student_name in step
+  r = await S.patch(`/api/candidates/${r.data.id}`, { first_name: 'Arun', last_name: 'K. Menon', age: 34, phone: '+44 7700 900123' });
+  assert.equal(r.status, 200); assert.equal(r.data.student_name, 'Arun K. Menon');
+});
+
+test('PT-03: teacher clash check warns about overlapping pre-tests and classes (Manager only)', async () => {
+  const child = await db.get(`SELECT id, pretest_at FROM candidates WHERE first_name = 'Meera' AND last_name = 'Pillai'`);
+  // Another pre-test 15 minutes into Meera's 30-minute slot overlaps
+  let r = await M.get(`/api/pretest-clash?teacher=${teacherA}&at=2026-11-02T17:15`);
+  assert.equal(r.status, 200);
+  assert.ok(r.data.busy.some(b => b.kind === 'Pre-test' && b.student_name === 'Meera Pillai'));
+  // Excluding the candidate itself (when editing) removes it; a time right after the slot is free
+  r = await M.get(`/api/pretest-clash?teacher=${teacherA}&at=2026-11-02T17:00&candidate=${child.id}`);
+  assert.ok(!r.data.busy.some(b => b.student_name === 'Meera Pillai'));
+  r = await M.get(`/api/pretest-clash?teacher=${teacherA}&at=2026-11-02T17:30`);
+  assert.ok(!r.data.busy.some(b => b.student_name === 'Meera Pillai'));
+  // A booked class is reported too
+  const cl = await db.get(`SELECT teacher_id, scheduled_at, class_code FROM classes WHERE status NOT IN ('Cancelled','Rescheduled') ORDER BY id LIMIT 1`);
+  if (cl) {
+    r = await M.get(`/api/pretest-clash?teacher=${cl.teacher_id}&at=${cl.scheduled_at}`);
+    assert.ok(r.data.busy.some(b => b.kind === 'Class' && b.code === cl.class_code));
+  }
+  assert.equal((await S.get(`/api/pretest-clash?teacher=${teacherA}&at=2026-11-02T17:15`)).status, 403);
+  assert.equal((await M.get(`/api/pretest-clash?teacher=${teacherA}&at=bad`)).status, 400);
 });

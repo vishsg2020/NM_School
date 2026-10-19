@@ -1,5 +1,5 @@
 import {
-  state, api, get, esc, html, raw, pill, fmtDT, fmtStamp, table, drawer, onSubmit, options, opt, teacherOptions,
+  state, api, get, esc, html, raw, pill, fmtDT, fmtStamp, fmtTime, table, drawer, onSubmit, options, opt, teacherOptions,
   setQuery, can, toast, uid, go, ApiError, stateBox,
 } from '../core.js';
 import { openAdmission } from './admissions.js';
@@ -90,6 +90,10 @@ function renderTable(rows, filtered) {
     : { empty: isTeacher ? 'No pre-tests assigned to you yet' : 'No candidates yet', emptyHint: isTeacher ? '' : ' Add the first candidate to start the queue.' });
 }
 
+const GENDERS = ['Male', 'Female', 'Prefer not to say'];
+const RELATIONSHIPS = ['Mother', 'Father', 'Guardian', 'Other'];
+const ADULT_AGE = 18;
+
 /** Add or edit a candidate. */
 export function candidateForm(c, after) {
   const isMgr = can('manager');
@@ -99,48 +103,144 @@ export function candidateForm(c, after) {
   const time = c?.pretest_at ? c.pretest_at.slice(11, 16) : '';
   const statusList = isMgr ? STATUSES : (editing && ['Completed', 'Needs Review'].includes(c.status) ? [c.status] : SALES_STATUSES);
   const repDefault = c?.sales_rep_id ?? (can('sales') ? state.me.id : '');
-  drawer({
-    title: editing ? `Edit ${c.student_name}` : 'Add pre-test candidate',
-    body: html`<form id="cand-form" novalidate>
-      <div class="grid2">
-        <div class="field"><label for="c-name">Student name *</label><input id="c-name" name="student_name" required maxlength="100" value="${c?.student_name}"></div>
-        <div class="field"><label for="c-parent">Parent name</label><input id="c-parent" name="parent_name" maxlength="100" value="${c?.parent_name}"></div>
-        <div class="field"><label for="c-phone">Phone *</label><input id="c-phone" name="phone" type="tel" required maxlength="30" value="${c?.phone}" placeholder="+91 98470 00000"></div>
-        <div class="field"><label for="c-loc">Location</label><input id="c-loc" name="location" maxlength="100" value="${c?.location}"></div>
-        <div class="field"><label for="c-age">Age</label><input id="c-age" name="age" type="number" min="2" max="99" inputmode="numeric" value="${c?.age}"></div>
-        ${raw(editing ? `<div class="field"><label>Lead ID</label><input value="${esc(c.lead_id)}" disabled></div>`
-          : `<div class="field"><label for="c-lead">Lead ID</label><input id="c-lead" name="lead_id" maxlength="30" placeholder="Leave blank to generate"><div class="hint">Use the existing ID if the lead already has one.</div></div>`)}
-      </div>
-      <div class="field"><label for="c-rep">Assigned Sales Representative *</label>
-        <select id="c-rep" name="sales_rep_id" required>${raw(options(state.reps.filter(r => r.active || r.id === repDefault).map(r => [r.id, r.name]), repDefault, 'Select'))}</select></div>
+  const minor0 = c?.age != null && c.age < ADULT_AGE;
+  const teacherLocked = !!c?.result_id;
+  const teacherField = isMgr ? `<div class="field"><label for="c-teacher">Pre-test teacher</label><select id="c-teacher" name="pretest_teacher_id" ${teacherLocked ? 'disabled' : ''}>${teacherOptions(c?.pretest_teacher_id ?? '', { blank: 'Not assigned yet' })}</select>${teacherLocked ? '<div class="hint">Locked: the assessment is recorded.</div>' : ''}</div>` : '';
+
+  // Timing: a new candidate picks Confirmed / Not confirmed; editing keeps the full set of fields.
+  const timing = editing ? html`
       <fieldset><legend>Pre-test timing</legend>
         <div class="grid3">
           <div class="field"><label for="c-date">Date</label><input id="c-date" name="date" type="date" value="${date}"></div>
           <div class="field"><label for="c-time">Time (IST)</label><input id="c-time" name="time" type="time" value="${time}"></div>
-          <div class="field"><label for="c-conf">Time confirmation</label><select id="c-conf" name="time_confirmation">${raw(options(CONFIRM, c?.time_confirmation || 'Not Confirmed'))}</select></div>
+          <div class="field"><label for="c-conf">Time confirmation</label><select id="c-conf" name="time_confirmation">${raw(options(CONFIRM, c.time_confirmation))}</select></div>
+        </div>
+        <div class="grid2">
+          <div class="field"><label for="c-status">Status</label><select id="c-status" name="status">${raw(options(statusList, c.status))}</select></div>
+          ${raw(teacherField)}
+        </div>
+        <div id="clash-box"></div>
+      </fieldset>` : html`
+      <fieldset><legend>Pre-test timing</legend>
+        <div class="seg" role="radiogroup" aria-label="Pre-test time">
+          <label><input type="radio" name="timing" value="confirmed" checked><span>Time confirmed</span></label>
+          <label><input type="radio" name="timing" value="pending"><span>Not confirmed yet</span></label>
+        </div>
+        <div class="grid3">
+          <div class="field" data-when="confirmed"><label for="c-date">Date *</label><input id="c-date" name="date" type="date"></div>
+          <div class="field" data-when="confirmed"><label for="c-time">Time (IST) *</label><input id="c-time" name="time" type="time"></div>
+          ${raw(teacherField)}
+        </div>
+        <p class="small muted hidden" data-when="pending">Status will be <b>Time Required</b>. Add the date and time later with Edit.</p>
+        ${raw(isMgr ? '' : '<p class="small muted">The Manager assigns the pre-test teacher.</p>')}
+        <div id="clash-box"></div>
+      </fieldset>`;
+
+  drawer({
+    title: editing ? `Edit ${c.student_name}` : 'Add pre-test candidate',
+    body: html`<form id="cand-form" novalidate>
+      <fieldset><legend>Student</legend>
+        <div class="grid2">
+          <div class="field"><label for="c-first">First name *</label><input id="c-first" name="first_name" required maxlength="60" autocomplete="off" value="${c?.first_name ?? c?.student_name}"></div>
+          <div class="field"><label for="c-last">Last name *</label><input id="c-last" name="last_name" required maxlength="60" autocomplete="off" value="${c?.last_name}"></div>
+        </div>
+        <div class="grid3">
+          <div class="field"><label for="c-age">Age *</label><input id="c-age" name="age" type="number" min="2" max="99" inputmode="numeric" required value="${c?.age}"></div>
+          <div class="field"><label for="c-gender">Gender</label><select id="c-gender" name="gender">${raw(options(GENDERS, c?.gender, 'Select'))}</select></div>
+          <div class="field"><label for="c-loc">Location</label><input id="c-loc" name="location" maxlength="100" value="${c?.location}"></div>
+        </div>
+        <div class="field" id="adult-phone"><label for="c-phone">Phone *</label><input id="c-phone" name="phone" type="tel" maxlength="30" value="${minor0 ? '' : c?.phone}" placeholder="+91 98470 00000">
+          <div class="hint">Required for students aged 18 and over.</div></div>
+      </fieldset>
+      <fieldset id="minor"><legend>Parent / guardian</legend>
+        <div class="grid2">
+          <div class="field"><label for="c-parent">Parent name *</label><input id="c-parent" name="parent_name" maxlength="100" value="${c?.parent_name}"></div>
+          <div class="field"><label for="c-rel">Relationship *</label><select id="c-rel" name="parent_relationship">${raw(options(RELATIONSHIPS, c?.parent_relationship, 'Select'))}</select></div>
+          <div class="field"><label for="c-pphone">Parent phone *</label><input id="c-pphone" name="phone" type="tel" maxlength="30" value="${minor0 ? c?.phone : ''}" placeholder="+91 98470 00000"></div>
+          <div class="field"><label for="c-sphone">Student phone</label><input id="c-sphone" name="student_phone" type="tel" maxlength="30" value="${c?.student_phone}" placeholder="Optional for under 18"></div>
         </div>
       </fieldset>
       <div class="grid2">
-        <div class="field"><label for="c-status">Status</label><select id="c-status" name="status">${raw(editing ? options(statusList, c.status) : options(['Scheduled', 'Time Required', 'Follow-up'], '', 'Automatic (Scheduled if a time is set)'))}</select></div>
-        ${raw(isMgr ? `<div class="field"><label for="c-teacher">Pre-test teacher</label><select id="c-teacher" name="pretest_teacher_id" ${c?.result_id ? 'disabled' : ''}>${teacherOptions(c?.pretest_teacher_id ?? '', { blank: 'Not assigned yet' })}</select>${c?.result_id ? '<div class="hint">Locked: the assessment is recorded.</div>' : ''}</div>` : '')}
+        ${raw(editing ? `<div class="field"><label>Lead ID</label><input value="${esc(c.lead_id)}" disabled></div>`
+          : '<div class="field"><label for="c-lead">Lead ID</label><input id="c-lead" name="lead_id" maxlength="30" placeholder="Leave blank to generate"></div>')}
+        <div class="field"><label for="c-rep">Assigned Sales Representative *</label>
+          <select id="c-rep" name="sales_rep_id" required>${raw(options(state.reps.filter(r => r.active || r.id === repDefault).map(r => [r.id, r.name]), repDefault, 'Select'))}</select></div>
       </div>
+      ${raw(timing)}
       <div class="field"><label for="c-notes">Notes</label><textarea id="c-notes" name="notes" maxlength="2000">${c?.notes}</textarea></div>
       <div id="dup-box"></div>
     </form>`,
-    foot: `<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" form="cand-form">${editing ? 'Save changes' : 'Add candidate'}</button>`,
+    foot: `<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" form="cand-form">${editing ? 'Save changes' : 'Add pre-test candidate'}</button>`,
     onMount: (d, close) => {
       const form = d.querySelector('#cand-form');
+      const $ = sel => form.querySelector(sel);
+      const show = (el, on) => { el.classList.toggle('hidden', !on); el.querySelectorAll('input, select, textarea').forEach(x => { x.disabled = !on; }); };
+
+      // Age < 18 shows the parent section; its phone field becomes the main contact number.
+      const isMinor = () => $('#c-age').value !== '' && Number($('#c-age').value) < ADULT_AGE;
+      const syncAge = () => {
+        const minor = isMinor();
+        const from = minor ? $('#c-phone') : $('#c-pphone'); const to = minor ? $('#c-pphone') : $('#c-phone');
+        if (!from.disabled && from.value && !to.value) to.value = from.value;
+        show($('#minor'), minor); show($('#adult-phone'), !minor);
+      };
+      $('#c-age').addEventListener('input', syncAge);
+      syncAge();
+
+      const timingMode = () => (editing ? 'edit' : form.querySelector('[name=timing]:checked').value);
+      const syncTiming = () => {
+        if (editing) return;
+        const confirmed = timingMode() === 'confirmed';
+        form.querySelectorAll('[data-when="confirmed"]').forEach(el => show(el, confirmed));
+        form.querySelectorAll('[data-when="pending"]').forEach(el => el.classList.toggle('hidden', confirmed));
+      };
+      form.querySelectorAll('[name=timing]').forEach(r => r.addEventListener('change', () => { syncTiming(); checkClash(); }));
+      syncTiming();
+
+      // Manager: warn (never block) when the chosen teacher is already busy at that time.
+      let clashSeq = 0;
+      async function checkClash() {
+        const box = d.querySelector('#clash-box'); const teacher = $('#c-teacher');
+        if (!box || !teacher) return;
+        const at = $('#c-date')?.value && $('#c-time')?.value && !$('#c-date').disabled ? `${$('#c-date').value}T${$('#c-time').value}` : '';
+        if (!teacher.value || teacher.disabled || !at) { box.innerHTML = ''; return; }
+        const my = ++clashSeq;
+        try {
+          const r = await get(`/api/pretest-clash?teacher=${teacher.value}&at=${encodeURIComponent(at)}${editing ? '&candidate=' + c.id : ''}`);
+          if (my !== clashSeq) return;
+          const items = [
+            ...r.busy.map(b => `${b.kind} ${b.code} with ${b.student_name}, ${fmtTime(b.start.slice(11))}–${fmtTime(b.end.slice(11))}`),
+            ...r.warnings.map(w => `This time is ${w}`),
+          ];
+          box.innerHTML = items.length ? `<div class="notice warn" role="alert"><strong>${esc(r.teacher)} ${r.busy.length ? 'is busy at this time' : 'may not be available'}:</strong>
+            <ul>${items.map(i => `<li>${esc(i)}</li>`).join('')}</ul>You can still save, or pick another time or teacher.</div>` : '';
+        } catch { if (my === clashSeq) box.innerHTML = ''; }
+      }
+      ['#c-teacher', '#c-date', '#c-time'].forEach(sel => $(sel)?.addEventListener('change', checkClash));
+      checkClash();
+
       let confirmDup = false;
       onSubmit(form, async v => {
-        if (!v.student_name.trim()) throw Object.assign(new Error('Student name is required'), { data: { field: 'Student name' } });
-        if (!v.phone.trim()) throw Object.assign(new Error('Phone is required'), { data: { field: 'Phone' } });
-        if ((v.date && !v.time) || (!v.date && v.time)) throw new Error('Enter both the pre-test date and time, or leave both empty');
+        const need = (val, label) => { if (!String(val ?? '').trim()) throw Object.assign(new Error(`${label} is required`), { data: { field: label } }); };
+        need(v.first_name, 'First name'); need(v.last_name, 'Last name'); need(v.age, 'Age');
+        const minor = isMinor();
+        if (minor) { need(v.parent_name, 'Parent name'); need(v.parent_relationship, 'Relationship'); need(v.phone, 'Parent phone'); }
+        else need(v.phone, 'Phone');
+        const mode = timingMode();
+        if (mode === 'confirmed') { need(v.date, 'Date'); need(v.time, 'Time (IST)'); }
+        if (mode === 'edit' && ((v.date && !v.time) || (!v.date && v.time))) throw new Error('Enter both the pre-test date and time, or leave both empty');
         const body = {
-          student_name: v.student_name, parent_name: v.parent_name, phone: v.phone, location: v.location, age: v.age,
-          sales_rep_id: v.sales_rep_id, pretest_at: v.date ? `${v.date}T${v.time}` : '', time_confirmation: v.time_confirmation,
-          notes: v.notes, confirm_duplicate: confirmDup,
+          first_name: v.first_name, last_name: v.last_name, age: v.age, gender: v.gender, location: v.location, phone: v.phone,
+          parent_name: minor ? v.parent_name : '', parent_relationship: minor ? v.parent_relationship : '', student_phone: minor ? v.student_phone : '',
+          sales_rep_id: v.sales_rep_id, notes: v.notes, confirm_duplicate: confirmDup,
         };
-        if (v.status) body.status = v.status;
+        if (mode === 'edit') {
+          Object.assign(body, { pretest_at: v.date ? `${v.date}T${v.time}` : '', time_confirmation: v.time_confirmation, status: v.status });
+        } else if (mode === 'confirmed') {
+          Object.assign(body, { pretest_at: `${v.date}T${v.time}`, time_confirmation: 'Confirmed' });
+        } else {
+          Object.assign(body, { pretest_at: '', time_confirmation: 'Not Confirmed' });
+        }
         if (isMgr && v.pretest_teacher_id !== undefined) body.pretest_teacher_id = v.pretest_teacher_id || null;
         if (!editing) { body.lead_id = v.lead_id; body.idempotency_key = key; }
         try {
@@ -184,9 +284,11 @@ export async function renderCandidate(page, { id }) {
         ${raw(c.history ? `<section class="panel"><h2>Change history</h2>${historyList(c.history)}</section>` : '')}
       </div>
       <section class="panel"><h2>Candidate</h2><dl class="facts">
-        <dt>Parent</dt><dd>${c.parent_name || '—'}</dd>
-        ${raw(c.phone ? `<dt>Phone</dt><dd><a href="tel:${esc(c.phone)}">${esc(c.phone)}</a></dd>` : '')}
         <dt>Age</dt><dd>${c.age ?? '—'}</dd>
+        <dt>Gender</dt><dd>${c.gender || '—'}</dd>
+        <dt>Parent</dt><dd>${c.parent_name || '—'}${c.parent_relationship ? ` (${c.parent_relationship})` : ''}</dd>
+        ${raw(c.phone ? `<dt>${c.age != null && c.age < ADULT_AGE ? 'Parent phone' : 'Phone'}</dt><dd><a href="tel:${esc(c.phone)}">${esc(c.phone)}</a></dd>` : '')}
+        ${raw(c.student_phone ? `<dt>Student phone</dt><dd><a href="tel:${esc(c.student_phone)}">${esc(c.student_phone)}</a></dd>` : '')}
         <dt>Location</dt><dd>${c.location || '—'}</dd>
         <dt>Sales rep</dt><dd>${c.sales_rep_name}</dd>
         <dt>Pre-test</dt><dd>${c.pretest_at ? fmtDT(c.pretest_at) : 'Not set'}</dd>

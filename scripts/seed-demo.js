@@ -64,9 +64,10 @@ const day = n => addMinutes(`${today()}T00:00`, n * 1440).slice(0, 10);
   for (let i = 0; i < kids.length; i++) {
     const who = i % 3 === 0 ? 'm' : 's';
     const c = await call(who, 'POST', '/api/candidates', {
-      student_name: `${kids[i]} (demo)`, parent_name: `Parent of ${kids[i]}`, phone: `+97150000${String(100 + i)}`, location: places[i % places.length], age: 5 + (i % 7),
+      first_name: kids[i], last_name: 'Demo', gender: i % 2 ? 'Male' : 'Female',
+      parent_name: `Parent of ${kids[i]}`, parent_relationship: i % 2 ? 'Father' : 'Mother', phone: `+97150000${String(100 + i)}`, location: places[i % places.length], age: 5 + (i % 7),
       pretest_at: i % 4 === 3 ? '' : `${day((i % 6) - 2)}T${String(10 + (i % 5)).padStart(2, '0')}:00`,
-      time_confirmation: i % 3 === 0 ? 'Confirmed' : 'Not Confirmed', idempotency_key: 'demo-' + i,
+      time_confirmation: i % 3 === 0 && i % 4 !== 3 ? 'Confirmed' : 'Not Confirmed', idempotency_key: 'demo-' + i,
     });
     C.push(c);
     if (i < 9) await call('m', 'PATCH', `/api/candidates/${c.id}`, { pretest_teacher_id: T[i % 3] });
