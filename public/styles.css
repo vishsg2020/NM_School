@@ -6,9 +6,13 @@
 @font-face { font-family: Plex; src: url(fonts/ibm-plex-sans-latin-600-normal.woff2) format('woff2'); font-weight: 600; font-display: swap; }
 
 :root {
-  --green: #1E5A46;
-  --green-deep: #133D30;
-  --green-soft: #E6F0EB;
+  /* Nalla Malayalam brand green (logo) — for the logo, highlights and large colour areas.
+     Text never sits in white on it (2.3:1); text-bearing greens use the darker shades below. */
+  --brand: #6ABD45;
+  --brand-ink: #16380D;      /* text on brand green: 5.6:1 */
+  --green: #2E6A1C;          /* buttons, links, active text: 6.6:1 on white */
+  --green-deep: #1F4D12;     /* hover */
+  --green-soft: #EAF5E3;     /* tints, active nav background */
   --turmeric: #D89B2B;
   --turmeric-soft: #FBF0D9;
   --turmeric-ink: #7A5210;
@@ -36,7 +40,7 @@ h1 { font-size: 28px; }
 h2 { font-size: 20px; margin-bottom: 12px; }
 h3 { font-size: 16px; margin-bottom: 8px; }
 p { margin: 0 0 8px; }
-:focus-visible { outline: 3px solid var(--turmeric); outline-offset: 2px; }
+:focus-visible { outline: 3px solid var(--green); outline-offset: 2px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .hidden { display: none !important; }
 .muted { color: var(--muted); }
@@ -49,22 +53,22 @@ p { margin: 0 0 8px; }
 
 /* ---------- Shell ---------- */
 .shell { display: grid; grid-template-columns: 232px 1fr; min-height: 100vh; }
-.side { background: var(--green-deep); color: #E8F0EC; padding: 20px 14px; position: sticky; top: 0; height: 100vh; overflow-y: auto; display: flex; flex-direction: column; }
-.brand { display: flex; align-items: center; gap: 12px; padding: 0 6px 20px; color: #fff; text-decoration: none; }
-.brand-mark { font-family: var(--display); font-weight: 700; font-size: 44px; line-height: 1; color: var(--turmeric); width: 52px; height: 52px; display: grid; place-items: center; border: 2px solid rgba(216,155,43,.55); border-radius: 50%; padding-top: 6px; }
-.brand-name { font-family: var(--display); font-weight: 700; font-size: 18px; line-height: 1.15; }
-.brand-name span { display: block; font-family: var(--sans); font-weight: 400; font-size: 12px; color: #B9CCC3; }
+.side { background: var(--surface); color: var(--ink); border-right: 1px solid var(--line); padding: 22px 14px 18px; position: sticky; top: 0; height: 100vh; overflow-y: auto; display: flex; flex-direction: column; }
+.brand { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 0 6px 18px; margin-bottom: 6px; border-bottom: 1px solid var(--line); text-decoration: none; color: var(--muted); }
+.brand-logo { width: 104px; height: auto; display: block; }
+.brand-sub { font-size: 12px; letter-spacing: .02em; }
+.brand-mark { width: 30px; height: auto; display: block; }
 .nav { list-style: none; margin: 0; padding: 0; }
-.nav a { display: flex; align-items: center; justify-content: space-between; color: #DCE8E2; text-decoration: none; padding: 9px 10px; border-radius: 6px; font-weight: 500; }
-.nav a:hover { background: rgba(255,255,255,.07); }
-.nav a[aria-current="page"] { background: var(--green); color: #fff; box-shadow: inset 3px 0 0 var(--turmeric); }
-.nav .count { background: var(--turmeric); color: #2B1D04; font-size: 12px; border-radius: 10px; padding: 0 7px; font-weight: 600; }
-.nav-group { margin: 16px 10px 4px; font-size: 12px; color: #93ADA1; }
-.side-foot { margin-top: auto; padding: 16px 10px 0; border-top: 1px solid rgba(255,255,255,.1); font-size: 13px; }
-.side-foot .who { color: #fff; font-weight: 500; }
-.side-foot .role { color: #B9CCC3; }
+.nav a { display: flex; align-items: center; justify-content: space-between; color: var(--ink); text-decoration: none; padding: 9px 10px 9px 12px; border-radius: 6px; font-weight: 500; }
+.nav a:hover { background: #F3F7F0; }
+.nav a[aria-current="page"] { background: var(--green-soft); color: var(--green); font-weight: 600; box-shadow: inset 4px 0 0 var(--brand); }
+.nav .count { background: var(--brand); color: var(--brand-ink); font-size: 12px; border-radius: 10px; padding: 0 7px; font-weight: 700; }
+.nav-group { margin: 16px 12px 4px; font-size: 12px; color: var(--muted); }
+.side-foot { margin-top: auto; padding: 16px 10px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.side-foot .who { color: var(--ink); font-weight: 600; }
+.side-foot .role { color: var(--muted); }
 .side-foot button { margin-top: 8px; }
-.side-foot a { color: #E8F0EC; }
+.side-foot a { color: var(--green); }
 .linkbtn { background: none; border: 0; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
 .topbar { display: none; }
 .main { padding: 28px 32px 64px; min-width: 0; max-width: 1280px; }
@@ -169,15 +173,14 @@ progress::-moz-progress-bar { background: var(--green); }
 .drawer-foot { padding: 12px 20px; border-top: 1px solid var(--line); background: var(--surface); display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
 .close-x { margin-left: auto; font-size: 22px; line-height: 1; background: none; border: 0; cursor: pointer; color: var(--muted); padding: 4px 8px; }
 .toast-zone { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 60; display: flex; flex-direction: column; gap: 8px; align-items: center; }
-.toast { background: var(--green-deep); color: #fff; padding: 10px 16px; border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.2); font-weight: 500; }
+.toast { background: var(--brand-ink); color: #fff; padding: 10px 16px; border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.2); font-weight: 500; }
 .toast.error { background: var(--red); }
 
 /* ---------- Login ---------- */
 .login-wrap { min-height: 100vh; display: grid; grid-template-columns: 1fr 1fr; }
-.login-art { background: var(--green-deep); color: #fff; display: flex; flex-direction: column; justify-content: center; padding: 48px; position: relative; overflow: hidden; }
-.login-art .big { font-family: var(--display); font-weight: 700; font-size: 280px; line-height: .8; color: var(--turmeric); opacity: .9; margin-bottom: 24px; }
-.login-art p { color: #C9D9D1; max-width: 34ch; }
-.login-art h1 { font-size: 32px; margin-bottom: 8px; }
+.login-art { background: var(--brand); color: var(--brand-ink); display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; padding: 48px; }
+.login-logo { width: min(300px, 60%); height: auto; display: block; margin-bottom: 28px; }
+.login-art p { color: var(--brand-ink); max-width: 30ch; font-size: 17px; font-weight: 500; margin: 0 auto; }
 .login-form { display: flex; align-items: center; justify-content: center; padding: 32px 20px; }
 .login-form form { width: 100%; max-width: 360px; }
 .login-form h2 { font-size: 24px; }
@@ -185,10 +188,10 @@ progress::-moz-progress-bar { background: var(--green); }
 /* ---------- Calendar ---------- */
 .week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; }
 .day { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); min-height: 160px; padding: 8px; min-width: 0; }
-.day.today { border-color: var(--green); box-shadow: inset 0 3px 0 var(--green); }
+.day.today { border-color: var(--brand); box-shadow: inset 0 3px 0 var(--brand); }
 .day-head { font-weight: 600; font-size: 13px; margin-bottom: 6px; display: flex; justify-content: space-between; }
 .day-hours { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
-.ev { display: block; border-radius: 5px; padding: 5px 7px; margin-bottom: 5px; font-size: 12px; text-decoration: none; color: var(--ink); background: var(--green-soft); border-left: 3px solid var(--green); overflow-wrap: anywhere; }
+.ev { display: block; border-radius: 5px; padding: 5px 7px; margin-bottom: 5px; font-size: 12px; text-decoration: none; color: var(--ink); background: var(--green-soft); border-left: 3px solid var(--brand); overflow-wrap: anywhere; }
 .ev.pretest { background: var(--blue-soft); border-left-color: var(--blue); }
 .ev.done { opacity: .65; }
 .ev.cancel { background: var(--grey-soft); border-left-color: #9AA5A0; text-decoration: line-through; }
@@ -197,10 +200,10 @@ progress::-moz-progress-bar { background: var(--green); }
 /* Charts */
 .chart { width: 100%; height: auto; display: block; }
 .chart text { font: 11px var(--sans); fill: var(--muted); }
-.chart .bar { fill: var(--green); }
+.chart .bar { fill: var(--brand); }
 .chart .bar2 { fill: var(--turmeric); }
 .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 6px; }
-.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; background: var(--green); vertical-align: -1px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; background: var(--brand); vertical-align: -1px; }
 .legend i.alt { background: var(--blue); }
 
 .windows-row { display: grid; grid-template-columns: 1.2fr 1fr 1fr 1fr auto; gap: 8px; align-items: end; margin-bottom: 8px; }
@@ -218,15 +221,16 @@ progress::-moz-progress-bar { background: var(--green); }
   .day { min-height: 0; }
   .login-wrap { grid-template-columns: 1fr; }
   .login-art { padding: 28px 20px; }
-  .login-art .big { font-size: 96px; margin-bottom: 8px; }
+  .login-logo { width: 150px; margin-bottom: 14px; }
 }
 @media (max-width: 820px) {
   .shell { grid-template-columns: 1fr; }
   .side { position: fixed; inset: 0 auto 0 0; width: 260px; z-index: 50; transform: translateX(-100%); transition: transform .2s; }
   .side.open { transform: none; }
-  .topbar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--green-deep); color: #fff; position: sticky; top: 0; z-index: 30; }
-  .topbar .brand-mark { width: 36px; height: 36px; font-size: 28px; padding-top: 4px; }
-  .topbar button { background: none; border: 1px solid rgba(255,255,255,.3); color: #fff; border-radius: 6px; padding: 6px 10px; font: inherit; }
+  .topbar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--surface); color: var(--ink); border-bottom: 3px solid var(--brand); position: sticky; top: 0; z-index: 30; }
+  .topbar strong { font-family: var(--display); font-size: 18px; color: var(--green); }
+  .topbar button { background: none; border: 1px solid var(--line); color: var(--ink); border-radius: 6px; padding: 6px 10px; font: inherit; }
+  .side { box-shadow: 4px 0 24px rgba(22,56,13,.18); }
   .main { padding: 18px 16px 48px; }
   h1 { font-size: 24px; }
   .grid2, .grid3 { grid-template-columns: 1fr; }
