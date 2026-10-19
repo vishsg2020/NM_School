@@ -270,3 +270,34 @@ progress::-moz-progress-bar { background: var(--green); }
 .steps li { margin-bottom: 10px; }
 .steps code, .codeline { background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; font-size: 13px; word-break: break-all; }
 .status-line { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+
+/* Notifications bell */
+.bell { position: relative; display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 8px; padding: 7px 12px; font: 500 14px/1.2 var(--sans); cursor: pointer; }
+.bell:hover { border-color: #B7C4BE; }
+.bell-n { background: #C0392B; color: #fff; border-radius: 10px; font: 700 11px/1 var(--sans); padding: 3px 6px; min-width: 18px; text-align: center; }
+.side-bell { padding: 4px 6px 10px; }
+.side-bell .bell { width: 100%; }
+.side-bell .bell-n { margin-left: auto; }
+.topbar .bell .bell-label { display: none; }
+.notes { list-style: none; margin: 0; padding: 0; }
+.note { display: block; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; text-decoration: none; color: var(--ink); background: var(--paper); }
+.note:hover { border-color: #B7C4BE; }
+.note.unread { background: var(--green-soft); border-color: #CFE6C3; }
+.note .t { display: block; font-weight: 600; }
+.note .b { display: block; font-size: 14px; margin-top: 2px; }
+.note .when { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+/* Test paper files */
+.drop { display: block; border: 2px dashed #B7C4BE; border-radius: 8px; padding: 14px; text-align: center; color: var(--ink); font-weight: 500; background: var(--surface); cursor: pointer; }
+.drop:hover { border-color: var(--brand); }
+#r-files:focus-visible + * , .drop:focus-within { outline: 2px solid var(--brand); }
+.file-list { list-style: none; padding: 0; margin: 10px 0 0; }
+.file-list li { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 6px; background: var(--paper); font-size: 14px; }
+.file-list li > div { flex: 1; min-width: 0; word-break: break-word; }
+.file-list .sz { color: var(--muted); font-size: 12px; }
+.thumb { width: 44px; height: 44px; border-radius: 4px; object-fit: cover; flex: none; border: 1px solid var(--line); display: block; }
+.thumb.doc { display: flex; align-items: center; justify-content: center; background: var(--green-soft); color: var(--green-deep); font: 700 11px var(--sans); }
+.sub.due { color: #9A3412; font-weight: 600; }
+
+@media (max-width: 820px) { .side-bell { display: none; } }
+#result-files h3 { margin: 16px 0 4px; }

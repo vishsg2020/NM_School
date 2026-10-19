@@ -20,6 +20,8 @@ function createApp(db) {
     });
     next();
   });
+  // Test-paper uploads arrive as base64 JSON (4 MB file -> ~5.4 MB); everything else stays small.
+  app.use('/api/candidates/:id/files', express.json({ limit: '6mb' }));
   app.use(express.json({ limit: '200kb' }));
   app.use(cookieParser());
 
@@ -51,6 +53,7 @@ function createApp(db) {
   require('./routes/classes')(app, ctx);
   require('./routes/reports')(app, ctx);
   require('./routes/settings')(app, ctx);
+  require('./routes/notifications')(app, ctx);
 
   app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Not found')));
   app.use(express.static(path.join(__dirname, '..', 'public'), { index: 'index.html', maxAge: '1h' }));

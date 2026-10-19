@@ -17,7 +17,7 @@ exports.handler = async (event, context) => {
     const db = createDb(pool);
     if (!bootstrapped) bootstrapped = ensureInitialManager(db).catch(e => { bootstrapped = null; throw e; });
     await bootstrapped;
-    const handler = serverless(createApp(db));
+    const handler = serverless(createApp(db), { binary: ['image/*', 'application/pdf'] }); // test-paper files
     return await handler(event, context);
   } catch (err) {
     // Start-up failed (settings, database unreachable, tables missing). Log the detail for the

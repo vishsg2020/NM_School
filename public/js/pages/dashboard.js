@@ -28,6 +28,7 @@ export async function render(page) {
           metric('Time required', m.time_required_pretests, '#/pretests?status=Time%20Required', m.time_required_pretests ? 'attention' : ''),
           metric('No teacher assigned', m.unassigned_pretests, '#/pretests?teacher=unassigned', m.unassigned_pretests ? 'attention' : ''),
           metric('Results to review', m.unreviewed_results, '#/pretests?review=pending'),
+          metric('Follow-ups due', m.followups_due, '#/pretests?followup=due', m.followups_due ? 'attention' : ''),
         ])}
         ${group('Admissions & students', [
           metric('Total students', m.total_students, '#/students'),
@@ -58,6 +59,7 @@ export async function render(page) {
           metric('Candidates I own', m.my_candidates, `#/pretests?sales_rep=${state.me.id}`),
           metric(`Added in ${fmtMonth(d.month)}`, m.my_added_month, `#/pretests?sales_rep=${state.me.id}`),
           metric(`My admissions in ${fmtMonth(d.month)}`, m.my_admissions_month, `#/pretests?sales_rep=${state.me.id}&result=Confirmed`),
+          metric('My follow-ups due', m.my_followups_due, `#/pretests?sales_rep=${state.me.id}&followup=due`, m.my_followups_due ? 'attention' : ''),
         ])}
         ${group('Pre-test queue', [
           metric('Scheduled', m.scheduled_pretests, '#/pretests?status=Scheduled'),

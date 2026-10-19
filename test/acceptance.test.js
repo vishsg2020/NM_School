@@ -504,3 +504,66 @@ test('Google Meet: Manager connects Google in Settings; confirmed pre-tests get 
   assert.ok(calls.some(c => c.url.includes('/revoke')));
   google.setFetch((...a) => globalThis.fetch(...a));
 });
+
+test('AS-01: follow-up time, test paper files, and notifications to Manager + Sales rep', async () => {
+  // A fresh candidate owned by Sales, taught by teacher A
+  let r = await S.post('/api/candidates', { first_name: 'Ira', last_name: 'Menon', age: 9, parent_name: 'Asha', parent_relationship: 'Mother',
+    phone: '+91 98470 22222', time_confirmation: 'Confirmed', pretest_at: '2026-11-10T16:00', idempotency_key: 'as01-1' });
+  const cand = r.data;
+  await M.patch(`/api/candidates/${cand.id}`, { pretest_teacher_id: teacherA });
+  const unread = async who => (await who.get('/api/notifications/count')).data.unread;
+  const mBefore = await unread(M); const sBefore = await unread(S);
+
+  // Follow-up needs a date
+  r = await T1.put(`/api/candidates/${cand.id}/result`, { recommended_course: 'Reader', assessment: 'Knows letters', admission_status: 'Follow-up' });
+  assert.equal(r.status, 400); assert.equal(r.data.field, 'Follow-up date');
+  r = await T1.put(`/api/candidates/${cand.id}/result`, { recommended_course: 'Reader', assessment: 'Knows letters', admission_status: 'Follow-up',
+    followup_date: '2026-10-15', followup_time: '18:30', followup_channel: 'WhatsApp', followup_note: 'Weekend batch' });
+  assert.equal(r.status, 200); assert.equal(r.data.followup_date, '2026-10-15'); assert.equal(r.data.followup_channel, 'WhatsApp');
+
+  // Manager and this candidate's Sales rep are notified; the teacher is not
+  assert.equal(await unread(M), mBefore + 1); assert.equal(await unread(S), sBefore + 1);
+  assert.equal(await unread(T1), 0);
+  const note = (await S.get('/api/notifications')).data.items[0];
+  assert.match(note.title, /Pre-test result: Ira Menon/); assert.match(note.body, /Follow-up · follow up 15 Oct 2026, 6:30 PM via WhatsApp/);
+  assert.equal(note.link, `#/candidate/${cand.id}`);
+  // Mark read
+  assert.equal((await S.post('/api/notifications/read', { ids: [note.id] })).data.unread, sBefore);
+  await M.post('/api/notifications/read', { all: true }); assert.equal(await unread(M), 0);
+
+  // Follow-ups due (TODAY_OVERRIDE = 2026-10-15) — queue filter and dashboards
+  const due = (await S.get('/api/candidates?followup=due')).data.map(c => c.id);
+  assert.ok(due.includes(cand.id));
+  assert.ok((await M.get('/api/dashboard')).data.metrics.followups_due >= 1);
+  assert.ok((await S.get('/api/dashboard')).data.metrics.my_followups_due >= 1);
+
+  // Changing to Confirmed clears follow-up details and notifies again ("Updated")
+  r = await T1.put(`/api/candidates/${cand.id}/result`, { recommended_course: 'Reader', assessment: 'Knows letters', admission_status: 'Confirmed', followup_date: '2026-10-20' });
+  assert.equal(r.data.followup_date, null);
+  assert.match((await M.get('/api/notifications')).data.items[0].title, /^Updated pre-test result/);
+  assert.ok(!(await S.get('/api/candidates?followup=due')).data.some(c => c.id === cand.id));
+
+  // Files: assigned teacher uploads; Sales can view; type is checked; max 5
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8ffff3f0005fe02fea7d6a5e10000000049454e44ae426082', 'hex');
+  const pdf = Buffer.from('%PDF-1.4\n%test\n');
+  r = await T1.post(`/api/candidates/${cand.id}/files`, { filename: 'page1.png', mime: 'image/png', data: png.toString('base64') });
+  assert.equal(r.status, 201); const fileId = r.data.id;
+  r = await T1.post(`/api/candidates/${cand.id}/files`, { filename: 'test.pdf', mime: 'application/pdf', data: pdf.toString('base64') });
+  assert.equal(r.status, 201);
+  assert.equal((await T1.post(`/api/candidates/${cand.id}/files`, { filename: 'fake.pdf', mime: 'application/pdf', data: png.toString('base64') })).status, 400);
+  assert.equal((await T1.post(`/api/candidates/${cand.id}/files`, { filename: 'x.svg', mime: 'image/svg+xml', data: 'PHN2Zz4=' })).status, 400);
+  assert.equal((await S.post(`/api/candidates/${cand.id}/files`, { filename: 'p.png', mime: 'image/png', data: png.toString('base64') })).status, 403);
+  const list = (await S.get(`/api/candidates/${cand.id}/files`)).data;
+  assert.equal(list.length, 2); assert.equal(list[0].data, undefined);
+  assert.equal((await S.get(`/api/candidates/${cand.id}`)).data.file_count, 2);
+  for (let i = 0; i < 3; i++) await M.post(`/api/candidates/${cand.id}/files`, { filename: `p${i}.png`, mime: 'image/png', data: png.toString('base64') });
+  assert.equal((await M.post(`/api/candidates/${cand.id}/files`, { filename: 'p6.png', mime: 'image/png', data: png.toString('base64') })).status, 400);
+  // Raw download returns the bytes with the right type
+  const cookieRes = await fetch(base + `/api/files/${fileId}`, { headers: { Cookie: '' } });
+  assert.equal(cookieRes.status, 401);
+  // Locked after Manager review for the teacher, not for the Manager
+  await M.post(`/api/candidates/${cand.id}/result/review`, { reviewed: true });
+  assert.equal((await T1.del(`/api/files/${fileId}`)).status, 400);
+  assert.equal((await M.del(`/api/files/${fileId}`)).status, 200);
+  assert.equal((await S.get(`/api/candidates/${cand.id}/files`)).data.length, 4);
+});

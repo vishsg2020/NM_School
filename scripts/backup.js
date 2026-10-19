@@ -10,7 +10,7 @@ const path = require('path');
 const { databasePool } = require('../src/db');
 
 const TABLES = ['users', 'teachers', 'teacher_hours', 'teacher_slots', 'candidates', 'pretest_results', 'students',
-  'enrollments', 'payments', 'classes', 'audit_events'];
+  'enrollments', 'payments', 'classes', 'audit_events', 'notifications', 'pretest_files'];
 
 (async () => {
   const cs = process.env.DATABASE_URL;
@@ -24,6 +24,8 @@ const TABLES = ['users', 'teachers', 'teacher_hours', 'teacher_slots', 'candidat
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'); // one consistent view
     for (const t of TABLES) out.tables[t] = (await client.query(`SELECT * FROM ${t} ORDER BY id`)).rows;
+    // File contents are stored as base64 text in the backup.
+    out.tables.pretest_files = out.tables.pretest_files.map(f => ({ ...f, data: Buffer.from(f.data).toString('base64') }));
     await client.query('COMMIT');
   } finally { client.release(); await pool.end(); }
   const file = path.join(dir, `nm-school-${out.exported_at.replace(/[:.]/g, '-').slice(0, 19)}.json`);

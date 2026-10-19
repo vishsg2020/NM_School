@@ -74,7 +74,7 @@ const day = n => addMinutes(`${today()}T00:00`, n * 1440).slice(0, 10);
   }
   const courses = ['Starter', 'Reader', 'Writer', 'Malayalam Master'];
   for (let i = 0; i < 6; i++) {
-    await call('m', 'PUT', `/api/candidates/${C[i].id}/result`, { recommended_course: courses[i % 4], assessment: 'Demo assessment notes.', admission_status: i === 5 ? 'Follow-up' : 'Confirmed', recommendation: '1:1 three times a week' });
+    await call('m', 'PUT', `/api/candidates/${C[i].id}/result`, { recommended_course: courses[i % 4], assessment: 'Demo assessment notes.', admission_status: i === 5 ? 'Follow-up' : 'Confirmed', recommendation: '1:1 three times a week', ...(i === 5 ? { followup_date: day(0), followup_time: '18:30', followup_channel: 'WhatsApp', followup_note: 'Parent wants weekend batch options' } : {}) });
   }
   // Admissions for the first four (one left awaiting setup).
   for (let i = 0; i < 4; i++) {

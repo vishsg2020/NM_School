@@ -35,6 +35,8 @@ module.exports = (app, { db }) => {
         time_required_pretests: `SELECT COUNT(*) n FROM candidates WHERE status = 'Time Required'`,
         unassigned_pretests: `SELECT COUNT(*) n FROM candidates WHERE pretest_teacher_id IS NULL AND status IN ('Scheduled','Time Required','Follow-up','Needs Review')`,
         unreviewed_results: `SELECT COUNT(*) n FROM pretest_results WHERE reviewed_at IS NULL`,
+        followups_due: `SELECT COUNT(*) n FROM candidates c JOIN pretest_results pr ON pr.candidate_id = c.id
+          WHERE c.status = 'Follow-up' AND pr.admission_status = 'Follow-up' AND pr.followup_date <= @t`,
         classes_today: `SELECT COUNT(*) n FROM classes WHERE substr(scheduled_at,1,10) = @t AND status NOT IN ('Cancelled','Rescheduled')`,
         classes_needing_update: `SELECT COUNT(*) n FROM classes WHERE status='Scheduled' AND substr(scheduled_at,1,10) < @t`,
         fees_collected_month: `SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Paid' AND substr(date,1,7) = @month`,
@@ -59,8 +61,10 @@ module.exports = (app, { db }) => {
         time_required_pretests: `SELECT COUNT(*) n FROM candidates WHERE status = 'Time Required'`,
         not_confirmed: `SELECT COUNT(*) n FROM candidates WHERE status IN ('Scheduled','Follow-up') AND time_confirmation <> 'Confirmed'`,
         follow_up: `SELECT COUNT(*) n FROM candidates WHERE status = 'Follow-up'`,
+        my_followups_due: `SELECT COUNT(*) n FROM candidates c JOIN pretest_results pr ON pr.candidate_id = c.id
+          WHERE c.status = 'Follow-up' AND pr.admission_status = 'Follow-up' AND pr.followup_date <= @t AND c.sales_rep_id = @me`,
         my_admissions_month: `SELECT COUNT(*) n FROM enrollments WHERE sales_rep_id = @me AND substr(admission_date,1,7) = @month`,
-      }, { me, month });
+      }, { me, month, t });
       const upcoming_pretests = (await db.all(`SELECT c.id, c.lead_id, c.student_name, c.pretest_at, c.status, c.time_confirmation, t.name teacher_name
         FROM candidates c LEFT JOIN teachers t ON t.id = c.pretest_teacher_id
         WHERE c.status IN ('Scheduled','Follow-up') AND c.pretest_at >= @t ORDER BY c.pretest_at LIMIT 10`, { t }));

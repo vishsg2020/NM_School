@@ -3,9 +3,10 @@ const { requireRole } = require('../auth');
 const { audit, history } = require('../audit');
 const { isUniqueViolation } = require('../db');
 const google = require('../google');
+const { notify, fmtWhen } = require('../notify');
 const {
   bad, notFound, forbidden, conflict, str, int, oneOf, bool, isValidDateTime, isValidDate, normPhone, normName, idParam,
-  addMinutes, weekdayOf,
+  addMinutes, weekdayOf, today, isValidTime,
 } = require('../util');
 
 const STATUSES = ['Scheduled', 'Time Required', 'Needs Review', 'Completed', 'Cancelled', 'Follow-up'];
@@ -16,11 +17,17 @@ const ADMISSION = ['Confirmed', 'Follow-up', 'Not Interested'];
 const GENDERS = ['Male', 'Female', 'Prefer not to say'];
 const RELATIONSHIPS = ['Mother', 'Father', 'Guardian', 'Other'];
 const ADULT_AGE = 18;
+const CHANNELS = ['WhatsApp', 'Call', 'Email'];
+const FILE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'application/pdf'];
+const MAX_FILE_BYTES = 4 * 1024 * 1024;
+const MAX_FILES = 5;
 const PRETEST_MINUTES = 30; // assumed pre-test length, used for the teacher clash check
 
 const SELECT = `
   SELECT c.*, r.name AS sales_rep_name, t.name AS teacher_name, t.active AS teacher_active,
          pr.id AS result_id, pr.admission_status, pr.recommended_course, pr.reviewed_at,
+         pr.followup_date, pr.followup_time, pr.followup_channel,
+         (SELECT COUNT(*) FROM pretest_files f WHERE f.candidate_id = c.id) AS file_count,
          s.id AS student_id,
          (SELECT COUNT(*) FROM enrollments e WHERE e.student_id = s.id) AS enrollment_count
   FROM candidates c
@@ -182,6 +189,7 @@ module.exports = (app, { db }) => {
     if (q.date_to && isValidDate(q.date_to)) { where.push('substr(c.pretest_at,1,10) <= @dt'); p.dt = q.date_to; }
     if (q.sales_rep && req.user.role !== 'teacher') { where.push('c.sales_rep_id = @rep'); p.rep = idParam(q.sales_rep); }
     if (q.result === 'none') where.push('pr.id IS NULL');
+    if (q.followup === 'due') { where.push(`c.status = 'Follow-up' AND pr.admission_status = 'Follow-up' AND pr.followup_date <= @today`); p.today = today(); }
     if (q.review === 'pending') where.push('pr.id IS NOT NULL AND pr.reviewed_at IS NULL');
     if (q.result && ADMISSION.includes(q.result)) { where.push('pr.admission_status = @res'); p.res = q.result; }
     const sql = `${SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
@@ -334,6 +342,77 @@ module.exports = (app, { db }) => {
     res.json(await byId(c.id));
   });
 
+  // ---------- Test paper files ----------
+  const canUpload = async (user, cand) => {
+    if (user.role === 'manager') return true;
+    if (user.role !== 'teacher' || cand.pretest_teacher_id !== user.teacher_id) return false;
+    const r = await db.get('SELECT reviewed_at FROM pretest_results WHERE candidate_id = ?', [cand.id]);
+    return !(r && r.reviewed_at);
+  };
+  const looksLike = (buf, mime) => {
+    const h = buf.subarray(0, 12);
+    if (mime === 'application/pdf') return h.subarray(0, 4).toString('latin1') === '%PDF';
+    if (mime === 'image/jpeg') return h[0] === 0xFF && h[1] === 0xD8;
+    if (mime === 'image/png') return h.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47]));
+    if (mime === 'image/webp') return h.subarray(0, 4).toString('latin1') === 'RIFF' && h.subarray(8, 12).toString('latin1') === 'WEBP';
+    return h.subarray(4, 8).toString('latin1') === 'ftyp'; // heic / heif
+  };
+
+  app.get('/api/candidates/:id/files', async (req, res) => {
+    const c = await db.get('SELECT * FROM candidates WHERE id = ?', [idParam(req.params.id)]);
+    if (!c || !canSee(req.user, c)) throw notFound('Candidate');
+    res.json(await db.all(`SELECT f.id, f.filename, f.mime, f.size_bytes, f.created_at, u.name AS uploaded_by_name
+      FROM pretest_files f JOIN users u ON u.id = f.uploaded_by WHERE f.candidate_id = ? ORDER BY f.id`, [c.id]));
+  });
+
+  app.post('/api/candidates/:id/files', requireRole('manager', 'teacher'), async (req, res) => {
+    const c = await db.get('SELECT * FROM candidates WHERE id = ?', [idParam(req.params.id)]);
+    if (!c || !canSee(req.user, c)) throw notFound('Candidate');
+    if (!(await canUpload(req.user, c))) throw bad('This result has been reviewed by the Manager and is now locked');
+    const b = req.body;
+    const filename = str(b.filename, { required: true, name: 'File name', max: 150 }).replace(/[\\/\r\n"]/g, '_');
+    const mime = oneOf(b.mime, FILE_TYPES, { required: true, name: 'File type' });
+    const buf = Buffer.from(String(b.data || ''), 'base64');
+    if (!buf.length) throw bad('The file is empty');
+    if (buf.length > MAX_FILE_BYTES) throw bad(`${filename} is larger than 4 MB. Please upload a smaller file.`);
+    if (!looksLike(buf, mime)) throw bad(`${filename} does not look like a valid ${mime === 'application/pdf' ? 'PDF' : 'image'}`);
+    const id = await db.tx(async t => {
+      await t.get('SELECT id FROM candidates WHERE id = ? FOR UPDATE', [c.id]);
+      const { n } = await t.get('SELECT COUNT(*) n FROM pretest_files WHERE candidate_id = ?', [c.id]);
+      if (n >= MAX_FILES) throw bad(`At most ${MAX_FILES} files per pre-test. Remove one first.`);
+      const r = await t.get(`INSERT INTO pretest_files (candidate_id, filename, mime, size_bytes, data, uploaded_by)
+        VALUES (?, ?, ?, ?, ?, ?) RETURNING id`, [c.id, filename, mime, buf.length, buf, req.user.id]);
+      await audit(t, req.user, 'candidate', c.id, 'file_uploaded', null, { file: filename, size: buf.length });
+      return r.id;
+    });
+    res.status(201).json({ id, filename, mime, size_bytes: buf.length });
+  });
+
+  app.get('/api/files/:id', async (req, res) => {
+    const f = await db.get('SELECT * FROM pretest_files WHERE id = ?', [idParam(req.params.id)]);
+    const c = f && await db.get('SELECT * FROM candidates WHERE id = ?', [f.candidate_id]);
+    if (!f || !c || !canSee(req.user, c)) throw notFound('File');
+    res.set({
+      'Content-Type': f.mime,
+      'Content-Disposition': `${req.query.download ? 'attachment' : 'inline'}; filename="${f.filename.replace(/[^\x20-\x7E]/g, '_')}"`,
+      'Cache-Control': 'private, max-age=3600',
+      'Content-Security-Policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox",
+    });
+    res.send(f.data);
+  });
+
+  app.delete('/api/files/:id', requireRole('manager', 'teacher'), async (req, res) => {
+    const f = await db.get('SELECT id, candidate_id, filename FROM pretest_files WHERE id = ?', [idParam(req.params.id)]);
+    const c = f && await db.get('SELECT * FROM candidates WHERE id = ?', [f.candidate_id]);
+    if (!f || !c || !canSee(req.user, c)) throw notFound('File');
+    if (!(await canUpload(req.user, c))) throw bad('This result has been reviewed by the Manager and is now locked');
+    await db.tx(async t => {
+      await t.run('DELETE FROM pretest_files WHERE id = ?', [f.id]);
+      await audit(t, req.user, 'candidate', c.id, 'file_removed', { file: f.filename }, null);
+    });
+    res.json({ ok: true });
+  });
+
   // ---------- Teacher clash check for a pre-test time (warning only, never blocks) ----------
   app.get('/api/pretest-clash', requireRole('manager'), async (req, res) => {
     const q = req.query;
@@ -382,7 +461,16 @@ module.exports = (app, { db }) => {
       objection: str(b.objection, { name: 'Objection', max: 2000 }),
       recommendation: str(b.recommendation, { name: 'Recommendation', max: 2000 }),
       notes: str(b.notes, { name: 'Notes', max: 4000 }),
+      followup_date: null, followup_time: null, followup_channel: null, followup_note: null,
     };
+    if (r.admission_status === 'Follow-up') {
+      r.followup_date = str(b.followup_date, { required: true, name: 'Follow-up date', max: 10 });
+      if (!isValidDate(r.followup_date)) throw bad('Follow-up date is not valid', { field: 'Follow-up date' });
+      r.followup_time = str(b.followup_time, { name: 'Follow-up time', max: 5 });
+      if (r.followup_time && !isValidTime(r.followup_time)) throw bad('Follow-up time is not valid', { field: 'Follow-up time' });
+      r.followup_channel = oneOf(b.followup_channel, CHANNELS, { name: 'Contact by' });
+      r.followup_note = str(b.followup_note, { name: 'Follow-up note', max: 500 });
+    }
 
     await db.tx(async t => {
       // Lock the candidate row so concurrent submissions are applied one after another.
@@ -396,12 +484,14 @@ module.exports = (app, { db }) => {
       if (prior) {
         await t.run(`UPDATE pretest_results SET recommended_course=@recommended_course, assessment=@assessment,
           admission_status=@admission_status, objection=@objection, recommendation=@recommendation, notes=@notes,
+          followup_date=@followup_date, followup_time=@followup_time, followup_channel=@followup_channel, followup_note=@followup_note,
           updated_at=now_iso() WHERE id=@id`, { ...r, id: prior.id });
         await audit(t, req.user, 'pretest_result', prior.id, 'updated', prior, { ...prior, ...r });
       } else {
         const ins = await t.get(`INSERT INTO pretest_results (candidate_id, teacher_id, recommended_course, assessment,
-          admission_status, objection, recommendation, notes, submitted_by)
-          VALUES (@candidate_id, @teacher_id, @recommended_course, @assessment, @admission_status, @objection, @recommendation, @notes, @by)
+          admission_status, objection, recommendation, notes, followup_date, followup_time, followup_channel, followup_note, submitted_by)
+          VALUES (@candidate_id, @teacher_id, @recommended_course, @assessment, @admission_status, @objection, @recommendation, @notes,
+          @followup_date, @followup_time, @followup_channel, @followup_note, @by)
           RETURNING id`, { ...r, by: req.user.id });
         await audit(t, req.user, 'pretest_result', ins.id, 'submitted', null, r);
       }
@@ -416,6 +506,18 @@ module.exports = (app, { db }) => {
         await t.run('UPDATE candidates SET status = ?, updated_at=now_iso() WHERE id = ?', [newStatus, cand.id]);
         await audit(t, req.user, 'candidate', cand.id, 'status_from_assessment', { status: cand.status }, { status: newStatus });
       }
+      // Tell every Manager and this candidate's Sales rep.
+      const teacher = await t.get('SELECT name FROM teachers WHERE id = ?', [cand.pretest_teacher_id]);
+      const recipients = (await t.all(`SELECT id FROM users WHERE active = 1 AND (role = 'manager' OR id = ?)`, [cand.sales_rep_id])).map(u => u.id);
+      const extra = r.admission_status === 'Follow-up'
+        ? ` · follow up ${fmtWhen(r.followup_date, r.followup_time)}${r.followup_channel ? ' via ' + r.followup_channel : ''}`
+        : r.admission_status === 'Confirmed' ? ' · ready for admission setup' : '';
+      await notify(t, recipients, {
+        kind: 'pretest_result',
+        title: `${prior ? 'Updated pre-test result' : 'Pre-test result'}: ${cand.student_name} (${cand.lead_id})`,
+        body: `${teacher ? teacher.name : 'Teacher'} · ${r.recommended_course} · ${r.admission_status}${extra}`,
+        link: `#/candidate/${cand.id}`,
+      }, req.user.id);
     });
     res.json(await db.get('SELECT * FROM pretest_results WHERE candidate_id = ?', [cand.id]));
   });

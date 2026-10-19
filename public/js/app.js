@@ -8,6 +8,7 @@ import * as teachers from './pages/teachers.js';
 import * as reports from './pages/reports.js';
 import * as users from './pages/users.js';
 import * as settings from './pages/settings.js';
+import { openNotifications, refreshBell } from './pages/notifications.js';
 
 const app = document.getElementById('app');
 
@@ -87,12 +88,14 @@ function renderShell() {
   }).join('');
   app.innerHTML = `
     <div class="topbar"><button type="button" id="menu-btn" aria-expanded="false" aria-controls="side">Menu</button>
-      <img class="brand-mark" src="img/mark-green.png" alt="" width="160" height="164"><strong>Nalla Malayalam</strong></div>
+      <img class="brand-mark" src="img/mark-green.png" alt="" width="160" height="164"><strong>Nalla Malayalam</strong>
+      <span class="spacer"></span><button type="button" class="bell" data-bell aria-label="Notifications"><span aria-hidden="true">🔔</span><span class="bell-label">Notifications</span><span class="bell-n hidden" data-bell-count></span></button></div>
     <div class="shell">
       <nav class="side" id="side" aria-label="Main">
         <a class="brand" href="#/dashboard" aria-label="Nalla Malayalam, go to dashboard">
           <img class="brand-logo" src="img/logo-green.png" alt="" width="480" height="588">
           <span class="brand-sub">School operations</span></a>
+        <div class="side-bell"><button type="button" class="bell" data-bell aria-label="Notifications"><span aria-hidden="true">🔔</span><span class="bell-label">Notifications</span><span class="bell-n hidden" data-bell-count></span></button></div>
         <ul class="nav">${nav}</ul>
         <div class="side-foot">
           <div class="who">${esc(me.name)}</div><div class="role">${esc(roleName(me.role))}</div>
@@ -101,6 +104,8 @@ function renderShell() {
       </nav>
       <main class="main" id="page" tabindex="-1"></main>
     </div>`;
+  document.querySelectorAll('[data-bell]').forEach(b => b.addEventListener('click', openNotifications));
+  refreshBell();
   document.getElementById('logout').addEventListener('click', async () => {
     await api('POST', '/api/logout').catch(() => {});
     state.me = null; renderLogin('You have signed out.');
@@ -141,7 +146,7 @@ async function route() {
     if (seq !== renderSeq) return;
     page.replaceChildren(view);
     page.focus({ preventScroll: true });
-    refreshBadges();
+    refreshBadges(); refreshBell();
   } catch (err) {
     if (seq !== renderSeq) return;
     if (err.status === 403) page.innerHTML = stateBox('error', 'You do not have access to this page', 'Ask the Manager if you need it.');
@@ -164,6 +169,8 @@ async function boot() {
 }
 
 window.addEventListener('hashchange', route);
+// New notifications show up within a minute while the app is open (and on every page change).
+setInterval(() => { if (state.me && document.visibilityState === 'visible') refreshBell(); }, 60000);
 window.addEventListener('nm:signed-out', () => { if (state.me) { state.me = null; renderLogin('Your session has ended. Please sign in again.'); } });
 window.addEventListener('nm:changed', () => { loadLookups().catch(() => {}); refreshBadges(); });
 window.addEventListener('unhandledrejection', e => { toast(e.reason?.message || 'Something went wrong', 'error'); });
