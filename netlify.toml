@@ -24,7 +24,7 @@
 [functions]
   node_bundler = "esbuild"
   # Ship these as real node_modules instead of bundling (they load optional/native pieces dynamically).
-  external_node_modules = ["express", "pg", "bcryptjs"]
+  external_node_modules = ["express", "pg", "bcryptjs", "exceljs"]
   # Optional: Supabase's root certificate for verified TLS (see README). Ignored if the file is absent.
   included_files = ["db/ca.crt"]
 

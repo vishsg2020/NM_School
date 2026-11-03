@@ -28,6 +28,7 @@ function client() {
   }
   return {
     get: u => call('GET', u), post: (u, b) => call('POST', u, b), patch: (u, b) => call('PATCH', u, b), put: (u, b) => call('PUT', u, b), del: u => call('DELETE', u),
+    raw: u => fetch(base + u, { headers: cookie ? { Cookie: cookie } : {} }),
     login: async email => { const r = await call('POST', '/api/login', { email, password: pw }); assert.equal(r.status, 200, JSON.stringify(r.data)); return r; },
   };
 }
@@ -720,4 +721,27 @@ test('Feedback: teacher rates the student; parent link (no login); weekly/off se
   // Teacher dashboard shows the teacher's own average
   const td = (await T1.get('/api/dashboard')).data.metrics;
   assert.ok('my_rating_month' in td);
+});
+
+
+test('Monthly report downloads as an Excel workbook (Manager only)', async () => {
+  const ExcelJS = require('exceljs');
+  assert.equal((await S.raw('/api/reports/export?month=2026-10')).status, 403);
+  const res = await M.raw('/api/reports/export?month=2026-10');
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /spreadsheetml/);
+  assert.match(res.headers.get('content-disposition'), /Nalla-Malayalam-report-2026-10\.xlsx/);
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(Buffer.from(await res.arrayBuffer()));
+  assert.deepEqual(wb.worksheets.map(w => w.name), ['Summary', 'Pre-tests', 'Admissions', 'Fees collected', 'Outstanding', 'Classes', 'Teachers', 'Sales reps', 'Feedback']);
+  // Summary figure matches the on-screen report
+  const rep = (await M.get('/api/reports?month=2026-10')).data;
+  const sum = wb.getWorksheet('Summary');
+  let collected = null;
+  sum.eachRow(r => { if (r.getCell(1).value === 'Fees collected in the month') collected = r.getCell(2).value; });
+  assert.equal(collected, rep.totals.collected_in_month);
+  // Fees sheet rows add up to the same total
+  const fees = wb.getWorksheet('Fees collected'); let total = 0;
+  fees.eachRow((r, i) => { if (i > 2 && typeof r.getCell(5).value === 'number') total += r.getCell(5).value; });
+  assert.equal(total, rep.totals.collected_in_month);
 });

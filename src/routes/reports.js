@@ -92,8 +92,22 @@ module.exports = (app, { db }) => {
     res.json({ role, today: t, month, metrics, today_classes, upcoming_pretests });
   });
 
-  app.get('/api/reports', requireRole('manager'), async (req, res) => {
-    const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : thisMonth();
+  const pickMonth = q => (/^\d{4}-\d{2}$/.test(q || '') ? q : thisMonth());
+  app.get('/api/reports', requireRole('manager'), async (req, res) => res.json(await reportData(pickMonth(req.query.month))));
+
+  // Monthly report as an Excel workbook, to download and keep as a record.
+  app.get('/api/reports/export', requireRole('manager'), async (req, res) => {
+    const month = pickMonth(req.query.month);
+    const buf = await require('../report-export').buildWorkbook(db, await reportData(month), month, req.user);
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="Nalla-Malayalam-report-${month}.xlsx"`,
+      'Cache-Control': 'no-store',
+    });
+    res.send(buf);
+  });
+
+  async function reportData(month) {
     const t = today();
     const months = monthsBack(6, month);
 
@@ -169,8 +183,8 @@ module.exports = (app, { db }) => {
       overdue_total: `SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Pending' AND date < @t`,
     }, { month, t });
     const feedback = await require('./feedback').feedbackSummary(db, month);
-    res.json({ month, today: t, totals, feedback, admissions_trend, delivery_trend, teacher_workload, course_mix, payment_followup, remaining_classes, by_sales_rep });
-  });
+    return { month, today: t, totals, feedback, admissions_trend, delivery_trend, teacher_workload, course_mix, payment_followup, remaining_classes, by_sales_rep };
+  }
 };
 
 function toMin(t) { return Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5)); }

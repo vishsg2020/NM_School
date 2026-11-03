@@ -133,6 +133,31 @@ consent screen published "In production", a Web OAuth client whose redirect URI 
 **Connect Google account**. Add the redirect URI for every address the app runs on (stage and production).
 Optional: `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` environment variables are used if nothing is saved in Settings.
 
+## Separate databases for stage and production
+
+Netlify can give each deploy context its own environment value, so the `stage` branch and `main` use different
+Supabase databases with the same code:
+
+1. In Supabase, create a **second project** (Free plan allows two active projects), e.g. `nm-school-prod`, region
+   East US (Ohio). Copy its **Connect → Transaction pooler** connection string.
+2. In Netlify → Project configuration → Environment variables → `DATABASE_URL` → **Edit** → choose
+   **"Different value for each deploy context"**:
+   - **Production** → the new `nm-school-prod` connection string.
+   - **Branch deploys** (and Deploy previews) → the existing project's connection string (stage / test data).
+   Keep the scopes **Builds** and **Functions** ticked.
+3. `INITIAL_MANAGER_EMAIL` / `INITIAL_MANAGER_PASSWORD` can stay for all contexts: the production database is empty,
+   so the first request creates the Manager there. Remove the password afterwards.
+4. **Deploys → Trigger deploy → Deploy site** on production. The build runs the migrations on the new, empty database.
+5. GitHub → Settings → Secrets → Actions: point `DATABASE_URL` (weekly backup) at the **production** database.
+
+Production then starts clean; stage keeps its test data. Each deploy only ever touches its own database.
+
+## Monthly report
+
+Reports → **Download Excel** saves the month as `Nalla-Malayalam-report-YYYY-MM.xlsx` (Summary, Pre-tests, Admissions,
+Fees collected, Outstanding, Classes, Teachers, Sales reps, Feedback) to keep as a record. **Print / save as PDF** prints
+the on-screen report.
+
 ## Parent feedback
 
 - **After a class:** when a class is marked Completed, the teacher or Manager can copy a WhatsApp-ready message with a

@@ -12,7 +12,7 @@ function barChart(rows, series, { money = false } = {}) {
     series.forEach((s, j) => {
       const v = r[s.key]; const h = Math.round((v / max) * (H - padB - padT));
       const x = gx + j * barW; const y = H - padB - h;
-      bars += `<rect class="${s.alt ? 'bar2' : 'bar'}" x="${x}" y="${y}" width="${barW - 3}" height="${Math.max(h, v ? 2 : 0)}" rx="2"></rect>`;
+      if (v) bars += `<rect class="${s.alt ? 'bar2' : 'bar'}" x="${x}" y="${y}" width="${barW - 3}" height="${Math.max(h, v ? 2 : 0)}" rx="2"></rect>`;
       if (v) bars += `<text x="${x + (barW - 3) / 2}" y="${y - 4}" text-anchor="middle">${esc(money ? Math.round(v / 1000) + 'k' : v)}</text>`;
     });
     bars += `<text x="${padL + i * groupW + groupW / 2}" y="${H - 8}" text-anchor="middle">${esc(fmtMonth(r.month).slice(0, 3))}</text>`;
@@ -26,7 +26,9 @@ export async function render(page, { query }) {
   const month = /^\d{4}-\d{2}$/.test(query.month || '') ? query.month : todayLocal().slice(0, 7);
   const r = await get('/api/reports?month=' + month);
   page.innerHTML = html`<div class="page-head"><div><h1>Reports</h1><div class="sub">${fmtMonth(month)} · every figure comes from the records linked on the other pages</div></div>
-    <div class="actions"><label class="sr-only" for="rep-m">Month</label><input id="rep-m" type="month" value="${month}"></div></div>
+    <div class="actions"><label class="sr-only" for="rep-m">Month</label><input id="rep-m" type="month" value="${month}">
+      <a class="btn primary" href="/api/reports/export?month=${month}" download>Download Excel</a>
+      <button class="btn" type="button" id="rep-print">Print / save as PDF</button></div></div>
     <div class="metric-groups">
       <section class="metric-group"><h2>${fmtMonth(month)}</h2>
         <a class="metric" href="#/students?admitted=${month}"><span class="metric-label">Admissions</span><span class="metric-value">${r.totals.admissions_in_month}</span></a>
@@ -107,6 +109,7 @@ export async function render(page, { query }) {
       { label: 'Sales rep', cell: p => esc(p.sales_rep_name) },
     ], r.payment_followup, { empty: 'No pending payments' }))}</section>`;
   page.querySelectorAll('[data-fb-teacher]').forEach(b => b.addEventListener('click', () => feedbackDrawer(b.dataset.fbTeacher, b.textContent, month)));
+  page.querySelector('#rep-print').addEventListener('click', () => window.print());
   page.querySelector('#rep-m').addEventListener('change', e => { if (e.target.value) location.hash = '#/reports?month=' + e.target.value; });
 }
 

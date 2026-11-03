@@ -417,3 +417,21 @@ progress::-moz-progress-bar { background: var(--green); }
 .fb-box .q { color: var(--muted); font-size: 12px; }
 .eoc { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
 .eoc h3 { margin: 0 0 6px; }
+
+/* Printing the Reports page (Print / save as PDF) */
+@media print {
+  @page { size: A4; margin: 12mm; }
+  body { background: #fff; }
+  .side, .topbar, .toast-zone, .page-head .actions, .linkbtn + *, button, .drawer, .drawer-backdrop { display: none !important; }
+  .shell { display: block; }
+  .main { padding: 0; max-width: none; }
+  .panel, .metric-group { box-shadow: none; break-inside: avoid; border-color: #ccc; }
+  .cols { display: block; }
+  a { color: inherit; text-decoration: none; }
+  .linkbtn { color: inherit; text-decoration: none; display: inline !important; }
+  table.responsive thead { display: table-header-group !important; }
+  table.responsive, table.responsive tbody { display: table !important; width: 100%; }
+  table.responsive tr { display: table-row !important; }
+  table.responsive td { display: table-cell !important; width: auto; }
+  table.responsive td::before { content: none !important; }
+}
