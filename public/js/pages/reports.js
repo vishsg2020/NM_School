@@ -23,16 +23,22 @@ function barChart(rows, series, { money = false } = {}) {
 }
 
 export async function render(page, { query }) {
-  const month = /^\d{4}-\d{2}$/.test(query.month || '') ? query.month : todayLocal().slice(0, 7);
+  const all = query.month === 'all';
+  const month = all ? 'all' : /^\d{4}-\d{2}$/.test(query.month || '') ? query.month : todayLocal().slice(0, 7);
+  const pickedMonth = all ? (query.last || todayLocal().slice(0, 7)) : month;
+  const label = all ? 'All time' : fmtMonth(month);
   const r = await get('/api/reports?month=' + month);
-  page.innerHTML = html`<div class="page-head"><div><h1>Reports</h1><div class="sub">${fmtMonth(month)} · every figure comes from the records linked on the other pages</div></div>
-    <div class="actions"><label class="sr-only" for="rep-m">Month</label><input id="rep-m" type="month" value="${month}">
-      <a class="btn primary" href="/api/reports/export?month=${month}" download>Download Excel</a>
+  page.innerHTML = html`<div class="page-head"><div><h1>Reports</h1><div class="sub">${label} · every figure comes from the records linked on the other pages</div></div>
+    <div class="actions"><div class="seg" role="radiogroup" aria-label="Period">
+        <label><input type="radio" name="period" value="month" ${all ? '' : 'checked'}><span>Month</span></label>
+        <label><input type="radio" name="period" value="all" ${all ? 'checked' : ''}><span>All time</span></label></div>
+      <label class="sr-only" for="rep-m">Month</label><input id="rep-m" type="month" value="${pickedMonth}" ${all ? 'disabled' : ''}>
+      <a class="btn primary" href="/api/reports/export?month=${month}" download>Download Excel${all ? ' (all time)' : ''}</a>
       <button class="btn" type="button" id="rep-print">Print / save as PDF</button></div></div>
     <div class="metric-groups">
-      <section class="metric-group"><h2>${fmtMonth(month)}</h2>
-        <a class="metric" href="#/students?admitted=${month}"><span class="metric-label">Admissions</span><span class="metric-value">${r.totals.admissions_in_month}</span></a>
-        <a class="metric" href="#/payments?status=Paid&date_from=${month}-01&date_to=${month}-31"><span class="metric-label">Fees collected</span><span class="metric-value">${inr(r.totals.collected_in_month)}</span></a></section>
+      <section class="metric-group"><h2>${label}</h2>
+        <a class="metric" href="${all ? '#/students' : `#/students?admitted=${month}`}"><span class="metric-label">Admissions</span><span class="metric-value">${r.totals.admissions_in_month}</span></a>
+        <a class="metric" href="${all ? '#/payments?status=Paid' : `#/payments?status=Paid&date_from=${month}-01&date_to=${month}-31`}"><span class="metric-label">Fees collected</span><span class="metric-value">${inr(r.totals.collected_in_month)}</span></a></section>
       <section class="metric-group"><h2>Outstanding now</h2>
         <a class="metric" href="#/payments?status=Pending"><span class="metric-label">Pending fees</span><span class="metric-value">${inr(r.totals.pending_total)}</span></a>
         <a class="metric alert" href="#/payments?status=Overdue"><span class="metric-label">Overdue fees</span><span class="metric-value">${inr(r.totals.overdue_total)}</span></a></section>
@@ -64,7 +70,7 @@ export async function render(page, { query }) {
         { label: 'Active students', cls: 'num', cell: t => esc(t.active_enrollments) },
       ], r.teacher_workload, { empty: 'No teachers yet' }))}
     </section>
-    <section class="panel"><h2>Pay inputs for ${fmtMonth(month)}</h2>
+    <section class="panel"><h2>Pay inputs · ${label}</h2>
       <p class="small muted">Counts used by the Regular/Freelance teacher notices and the sales incentive policy. Pay itself is not calculated in this system.</p>
       <div class="cols">
         <div>${raw(table([
@@ -75,7 +81,7 @@ export async function render(page, { query }) {
         ], r.teacher_workload, { empty: 'No teachers' }))}</div>
         <div>${raw(table([
           { label: 'Sales rep', cell: s => esc(s.name) },
-          { label: 'Collected in month', cls: 'num', cell: s => esc(inr(s.collected_in_month)) },
+          { label: all ? 'Collected' : 'Collected in month', cls: 'num', cell: s => esc(inr(s.collected_in_month)) },
         ], r.by_sales_rep, { empty: 'No sales activity' }))}</div>
       </div>
     </section>
@@ -85,7 +91,7 @@ export async function render(page, { query }) {
         { label: 'Candidates added', cls: 'num', cell: s => esc(s.candidates_added) },
         { label: 'Admissions', cls: 'num', cell: s => esc(s.admissions) },
         { label: 'Admitted fee value', cls: 'num', cell: s => esc(inr(s.admitted_fee_value)) },
-        { label: 'Collected in month', cls: 'num', cell: s => esc(inr(s.collected_in_month)) },
+        { label: all ? 'Collected' : 'Collected in month', cls: 'num', cell: s => esc(inr(s.collected_in_month)) },
       ], r.by_sales_rep, { empty: 'No sales activity this month' }))}
     </section>
     <div class="cols">
@@ -110,12 +116,15 @@ export async function render(page, { query }) {
     ], r.payment_followup, { empty: 'No pending payments' }))}</section>`;
   page.querySelectorAll('[data-fb-teacher]').forEach(b => b.addEventListener('click', () => feedbackDrawer(b.dataset.fbTeacher, b.textContent, month)));
   page.querySelector('#rep-print').addEventListener('click', () => window.print());
+  page.querySelectorAll('[name=period]').forEach(x => x.addEventListener('change', () => {
+    location.hash = x.value === 'all' ? `#/reports?month=all&last=${pickedMonth}` : `#/reports?month=${pickedMonth}`;
+  }));
   page.querySelector('#rep-m').addEventListener('change', e => { if (e.target.value) location.hash = '#/reports?month=' + e.target.value; });
 }
 
 function feedbackDrawer(teacherId, name, month) {
   drawer({
-    title: `Feedback · ${name} · ${fmtMonth(month)}`,
+    title: `Feedback · ${name} · ${month === 'all' ? 'All time' : fmtMonth(month)}`,
     body: `<div id="fb-list">${stateBox('loading')}</div>`,
     onMount: async d => {
       const list = await get(`/api/feedback?teacher=${teacherId}&month=${month}`);

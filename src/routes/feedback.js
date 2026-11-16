@@ -28,13 +28,14 @@ const avg = v => (v.length ? Math.round((v.reduce((a, b) => a + b, 0) / v.length
 /** Average ratings per teacher for a month (by answer date). */
 async function feedbackSummary(db, month) {
   const rows = await db.all(`SELECT f.*, t.name AS teacher_name FROM feedback f JOIN teachers t ON t.id = f.teacher_id
-    WHERE substr(f.created_at,1,7) = ? OR substr(f.submitted_at,1,7) = ?`, [month, month]);
+    WHERE ? = 'all' OR substr(f.created_at,1,7) = ? OR substr(f.submitted_at,1,7) = ?`, [month, month, month]);
+  const inM = v => !!v && (month === 'all' || v.startsWith(month));
   const byT = new Map();
   for (const r of rows) {
     if (!byT.has(r.teacher_id)) byT.set(r.teacher_id, { teacher_id: r.teacher_id, name: r.teacher_name, links: 0, class: [], course: [] });
     const t = byT.get(r.teacher_id);
-    if (r.kind === 'class' && r.created_at.startsWith(month)) t.links++;
-    if (r.submitted_at && r.submitted_at.startsWith(month)) t[r.kind].push(r);
+    if (r.kind === 'class' && inM(r.created_at)) t.links++;
+    if (inM(r.submitted_at)) t[r.kind].push(r);
   }
   return [...byT.values()].map(t => ({
     teacher_id: t.teacher_id, name: t.name, class_links: t.links, class_responses: t.class.length,

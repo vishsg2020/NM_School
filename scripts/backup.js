@@ -26,6 +26,7 @@ const TABLES = ['users', 'teachers', 'teacher_hours', 'teacher_slots', 'candidat
     for (const t of TABLES) out.tables[t] = (await client.query(`SELECT * FROM ${t} ORDER BY id`)).rows;
     // File contents are stored as base64 text in the backup.
     out.tables.pretest_files = out.tables.pretest_files.map(f => ({ ...f, data: Buffer.from(f.data).toString('base64') }));
+    out.tables.teachers = out.tables.teachers.map(t => ({ ...t, photo: t.photo ? Buffer.from(t.photo).toString('base64') : null }));
     await client.query('COMMIT');
   } finally { client.release(); await pool.end(); }
   const file = path.join(dir, `nm-school-${out.exported_at.replace(/[:.]/g, '-').slice(0, 19)}.json`);

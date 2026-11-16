@@ -9,6 +9,15 @@ const {
 } = require('../util');
 const { PRETEST_MINUTES } = require('./candidates');
 
+// Student list sort options (ST-01). Newest admission first by default.
+const STUDENT_SORTS = {
+  newest: 'COALESCE(e.admission_date, substr(s.created_at,1,10)) DESC, s.id DESC',
+  oldest: 'COALESCE(e.admission_date, substr(s.created_at,1,10)) ASC, s.id ASC',
+  name: 'c.student_name ASC, s.id',
+  remaining: '(e.total_classes - e.completed_classes) ASC NULLS LAST, c.student_name',
+  end_date: 'e.end_date ASC NULLS LAST, c.student_name',
+  teacher: 't.name ASC NULLS LAST, c.student_name',
+};
 const DAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const DURATION = { '1:1': 30, '3:1': 40 };
 
@@ -318,7 +327,19 @@ module.exports = (app, { db }) => {
       overdue: rows.filter(r => r.overdue).reduce((s, r) => s + r.amount, 0),
       count: rows.length,
     };
-    res.json({ rows, totals, today: p.today });
+    // Headline figures (PY-01): received follows the date range only; pending/overdue are everything still open.
+    const rng = []; const rp = { today: p.today };
+    if (p.df) { rng.push('date >= @df'); rp.df = p.df; }
+    if (p.dt) { rng.push('date <= @dt'); rp.dt = p.dt; }
+    const summary = await db.get(`SELECT
+        (SELECT COUNT(DISTINCT student_id) FROM enrollments) AS students,
+        (SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='Paid' ${rng.length ? 'AND ' + rng.join(' AND ') : ''}) AS received,
+        (SELECT COUNT(*) FROM payments WHERE status='Paid' ${rng.length ? 'AND ' + rng.join(' AND ') : ''}) AS received_count,
+        (SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='Pending') AS pending,
+        (SELECT COUNT(*) FROM payments WHERE status='Pending') AS pending_count,
+        (SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='Pending' AND date < @today) AS overdue,
+        (SELECT COUNT(*) FROM payments WHERE status='Pending' AND date < @today) AS overdue_count`, rp);
+    res.json({ rows, totals, summary, today: p.today });
   });
 
   app.patch('/api/payments/:id', requireRole('manager'), async (req, res) => {
@@ -356,11 +377,12 @@ module.exports = (app, { db }) => {
       SELECT s.id, s.student_code, s.created_at, c.id AS candidate_id, c.lead_id, c.student_name, c.parent_name, c.age, c.location,
              ${req.user.role === 'manager' ? 'c.phone,' : ''} r.name AS sales_rep_name,
              e.id AS enrollment_id, e.course, e.class_mode, e.status AS enrollment_status, t.name AS teacher_name,
-             e.total_classes, e.completed_classes, (e.total_classes - e.completed_classes) AS remaining_classes
+             e.total_classes, e.completed_classes, (e.total_classes - e.completed_classes) AS remaining_classes,
+             e.admission_date, e.end_date
       FROM students s JOIN candidates c ON c.id = s.candidate_id JOIN users r ON r.id = c.sales_rep_id
       LEFT JOIN enrollments e ON e.id = (SELECT x.id FROM enrollments x WHERE x.student_id = s.id ORDER BY (x.status='Active') DESC, x.id DESC LIMIT 1)
       LEFT JOIN teachers t ON t.id = e.teacher_id
-      ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY c.student_name`, p);
+      ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ${STUDENT_SORTS[q.sort] || STUDENT_SORTS.newest}`, p);
     res.json(rows);
   });
 

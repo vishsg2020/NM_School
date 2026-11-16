@@ -15,6 +15,7 @@ async function windowsOf(db, id) {
 async function loadTeacher(db, id) {
   const t = await db.get('SELECT * FROM teachers WHERE id = ?', [id]);
   if (!t) return null;
+  t.has_photo = !!t.photo_mime; delete t.photo; delete t.photo_mime;
   Object.assign(t, await windowsOf(db, id));
   t.login = (await db.get('SELECT id, email, active FROM users WHERE teacher_id = ?', [id])) || null;
   return t;
@@ -40,7 +41,7 @@ function parseWindows(list, { withFormat, label }) {
 }
 
 function teacherInput(b, existing = {}) {
-  const t = existing.id ? { ...existing } : { phone: null, email: null, monthly_capacity: null, notes: null };
+  const t = existing.id ? { ...existing } : { phone: null, email: null, monthly_capacity: null, notes: null, about: null };
   if (b.name !== undefined || !existing.id) t.name = str(b.name, { required: true, name: 'Name', max: 100 });
   if (b.phone !== undefined) t.phone = str(b.phone, { name: 'Phone', max: 30 });
   if (b.email !== undefined) t.email = str(b.email, { name: 'Email', max: 200 });
@@ -50,6 +51,8 @@ function teacherInput(b, existing = {}) {
   if (!t.supports_1to1 && !t.supports_3to1) throw bad('Select at least one supported class format');
   if (b.monthly_capacity !== undefined) t.monthly_capacity = int(b.monthly_capacity, { min: 0, max: 2000, name: 'Monthly class capacity' });
   if (b.notes !== undefined) t.notes = str(b.notes, { name: 'Notes', max: 1000 });
+  // Short introduction shown to parents on the student page.
+  if (b.about !== undefined) t.about = str(b.about, { name: 'About', max: 400 });
   return t;
 }
 
@@ -95,6 +98,7 @@ module.exports = (app, { db }) => {
     const slots = await db.all('SELECT teacher_id, weekday, start_time, end_time, format FROM teacher_slots ORDER BY weekday, start_time');
     const strip = ({ teacher_id, ...w }) => w;
     for (const r of rows) {
+      r.has_photo = !!r.photo_mime; delete r.photo; delete r.photo_mime;
       r.hours = hours.filter(h => h.teacher_id === r.id).map(strip);
       r.slots = slots.filter(x => x.teacher_id === r.id).map(strip);
     }
@@ -115,8 +119,8 @@ module.exports = (app, { db }) => {
     const slots = parseWindows(req.body.slots || [], { label: 'Availability slots', withFormat: true });
     checkSlotsInsideHours(hours, slots);
     const id = await db.tx(async tx => {
-      const r = await tx.get(`INSERT INTO teachers (name, phone, email, employment_type, supports_1to1, supports_3to1, monthly_capacity, notes)
-        VALUES (@name, @phone, @email, @employment_type, @supports_1to1, @supports_3to1, @monthly_capacity, @notes) RETURNING id`, t);
+      const r = await tx.get(`INSERT INTO teachers (name, phone, email, employment_type, supports_1to1, supports_3to1, monthly_capacity, notes, about)
+        VALUES (@name, @phone, @email, @employment_type, @supports_1to1, @supports_3to1, @monthly_capacity, @notes, @about) RETURNING id`, t);
       await saveWindows(tx, r.id, hours, slots);
       await audit(tx, req.user, 'teacher', r.id, 'created', null, { ...t, hours, slots });
       return r.id;
@@ -127,7 +131,7 @@ module.exports = (app, { db }) => {
   app.patch('/api/teachers/:id', requireRole('manager'), async (req, res) => {
     const before = await loadTeacher(db, int(req.params.id, { min: 1, name: 'Teacher' }));
     if (!before) throw notFound('Teacher');
-    const { hours: bh, slots: bs, login, ...base } = before;
+    const { hours: bh, slots: bs, login, has_photo, ...base } = before;
     const t = teacherInput(req.body, base);
     if (req.body.active !== undefined) t.active = bool(req.body.active) ? 1 : 0;
     const hours = req.body.hours !== undefined ? parseWindows(req.body.hours, { label: 'Working hours' }) : bh;
@@ -151,7 +155,7 @@ module.exports = (app, { db }) => {
     await db.tx(async tx => {
       await tx.run(`UPDATE teachers SET name=@name, phone=@phone, email=@email, employment_type=@employment_type,
         supports_1to1=@supports_1to1, supports_3to1=@supports_3to1, monthly_capacity=@monthly_capacity,
-        notes=@notes, active=@active, updated_at=now_iso() WHERE id=@id`, t);
+        notes=@notes, about=@about, active=@active, updated_at=now_iso() WHERE id=@id`, t);
       if (req.body.hours !== undefined || req.body.slots !== undefined) await saveWindows(tx, before.id, hours, slots);
       if (t.active === 0) {
         const u = await tx.get('SELECT id FROM users WHERE teacher_id = ?', [before.id]);
@@ -161,6 +165,33 @@ module.exports = (app, { db }) => {
         { ...base, hours: bh, slots: bs }, { ...t, hours, slots });
     });
     res.json({ ...(await loadTeacher(db, before.id)), impact });
+  });
+
+  // Teacher photo for the parents' student page (images only, shrunk in the browser first).
+  app.put('/api/teachers/:id/photo', requireRole('manager'), async (req, res) => {
+    const id = int(req.params.id, { min: 1, name: 'Teacher' });
+    if (!(await db.get('SELECT id FROM teachers WHERE id = ?', [id]))) throw notFound('Teacher');
+    if (req.body.remove) {
+      await db.run('UPDATE teachers SET photo = NULL, photo_mime = NULL WHERE id = ?', [id]);
+      return res.json({ has_photo: false });
+    }
+    const mime = oneOf(req.body.mime, ['image/jpeg', 'image/png', 'image/webp'], { required: true, name: 'Photo type' });
+    const buf = Buffer.from(String(req.body.data || ''), 'base64');
+    if (!buf.length || buf.length > 2 * 1024 * 1024) throw bad('Choose a photo under 2 MB');
+    const ok = mime === 'image/jpeg' ? buf[0] === 0xFF && buf[1] === 0xD8
+      : mime === 'image/png' ? buf.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47]))
+        : buf.subarray(0, 4).toString('latin1') === 'RIFF';
+    if (!ok) throw bad('That file is not a valid image');
+    await db.tx(async tx => {
+      await tx.run('UPDATE teachers SET photo = ?, photo_mime = ?, updated_at = now_iso() WHERE id = ?', [buf, mime, id]);
+      await audit(tx, req.user, 'teacher', id, 'photo_changed', null, { size: buf.length });
+    });
+    res.json({ has_photo: true });
+  });
+  app.get('/api/teachers/:id/photo', async (req, res) => {
+    const t = await db.get('SELECT photo, photo_mime FROM teachers WHERE id = ?', [int(req.params.id, { min: 1, name: 'Teacher' })]);
+    if (!t || !t.photo) throw notFound('Photo');
+    res.set({ 'Content-Type': t.photo_mime, 'Cache-Control': 'private, max-age=300' }).send(t.photo);
   });
 
   app.get('/api/teachers/:id/impact', requireRole('manager'), async (req, res) => {

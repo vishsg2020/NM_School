@@ -7,12 +7,14 @@ const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 export const slotText = e => (e.slot_days ? `${e.slot_days.split(',').map(d => DAYS[d]).join(', ')} at ${fmtTime(e.slot_time)} IST` : '—');
 
 export async function renderList(page, { query }) {
-  const f = { q: query.q || '', status: query.status || '', admitted: query.admitted || '' };
+  let savedSort = null; try { savedSort = localStorage.getItem('nm.students.sort'); } catch { /* private mode */ }
+  const f = { q: query.q || '', status: query.status || '', admitted: query.admitted || '', sort: query.sort || savedSort || 'newest' };
   page.innerHTML = html`<div class="page-head"><div><h1>Students</h1>
     <div class="sub">${can('teacher') ? 'Students you teach.' : 'Every child with a Confirmed pre-test.'}</div></div></div>
     <form class="filters" id="sf" role="search" aria-label="Filter students">
       <div class="field grow"><label for="s-q">Search</label><input id="s-q" name="q" type="search" value="${f.q}" placeholder="Student, parent, Lead ID, Student ID"></div>
       ${raw(can('manager') ? `<div class="field"><label for="s-st">Enrollment</label><select id="s-st" name="status">${options([['active', 'Active enrollment'], ['awaiting', 'Awaiting admission setup']], f.status, 'All')}</select></div>` : '')}
+      <div class="field"><label for="s-sort">Sort by</label><select id="s-sort" name="sort">${raw(options([['newest', 'Newest admission first'], ['oldest', 'Oldest first'], ['name', 'Name A–Z'], ['remaining', 'Fewest classes remaining'], ['end_date', 'End date (soonest)'], ['teacher', 'Teacher']], f.sort))}</select></div>
       <input type="hidden" name="admitted" value="${f.admitted}">
       <button class="btn" type="button" id="s-clear">Clear filters</button>
     </form>
@@ -23,6 +25,7 @@ export async function renderList(page, { query }) {
   let seq = 0;
   async function load() {
     const d = Object.fromEntries(new FormData(form)); setQuery(d);
+    try { localStorage.setItem('nm.students.sort', d.sort); } catch { /* private mode */ }
     const my = ++seq;
     try {
       const rows = await get('/api/students?' + new URLSearchParams(Object.entries(d).filter(([, v]) => v)));
@@ -33,6 +36,8 @@ export async function renderList(page, { query }) {
         { label: 'Parent', cell: r => esc(r.parent_name || '—') + (r.phone ? `<span class="sub">${esc(r.phone)}</span>` : '') },
         { label: 'Course', cell: r => (r.course ? `${esc(r.course)}<span class="sub">${esc(r.class_mode)} · ${esc(r.teacher_name)}</span>` : pill('Awaiting setup', 'amber').__raw) },
         { label: 'Progress', cls: 'progress-cell', cell: r => (r.course ? `<progress max="${r.total_classes}" value="${r.completed_classes}" aria-label="Classes completed"></progress><span class="sub">${r.completed_classes} of ${r.total_classes} done · ${r.remaining_classes} left</span>` : '—') },
+        { label: 'Admitted', cell: r => (r.admission_date ? `<span class="nowrap">${esc(fmtDate(r.admission_date))}</span>` : '—') },
+        { label: 'End date', cell: r => (r.end_date ? `<span class="nowrap">${esc(fmtDate(r.end_date))}</span>` : '—') },
         { label: 'Status', cell: r => (r.enrollment_status ? pill(r.enrollment_status).__raw : '—') },
       ], rows, { empty: 'No students found', emptyHint: can('teacher') ? ' Students appear when the Manager assigns them to you.' : '' });
     } catch (e) { if (my === seq) list.innerHTML = stateBox('error', 'Could not load students', e.message); }
@@ -40,7 +45,7 @@ export async function renderList(page, { query }) {
   let t;
   form.addEventListener('input', e => { clearTimeout(t); t = setTimeout(load, e.target.type === 'search' ? 250 : 0); });
   form.addEventListener('submit', e => { e.preventDefault(); load(); });
-  page.querySelector('#s-clear').addEventListener('click', () => { form.querySelectorAll('input,select').forEach(x => { x.value = ''; }); page.querySelector('.notice.info')?.remove(); load(); });
+  page.querySelector('#s-clear').addEventListener('click', () => { form.querySelectorAll('input,select:not(#s-sort)').forEach(x => { x.value = ''; }); page.querySelector('.notice.info')?.remove(); load(); });
   await load();
 }
 
@@ -80,6 +85,8 @@ export async function renderProfile(page, { id }) {
   wrap.innerHTML = s.enrollments.map(e => html`<section class="panel" data-enr="${e.id}">
       <div class="row"><h2>${e.course} · ${e.class_mode}</h2>${raw(pill(e.status).__raw)}<span class="spacer"></span>
         ${raw(e.status === 'Active' ? '<button class="btn small primary" type="button" data-act="schedule">Schedule classes</button>' : '')}
+        ${raw(isMgr ? '<button class="btn small" type="button" data-act="reset">Reset schedule</button>' : '')}
+        <button class="btn small" type="button" data-act="share">Copy student page link</button>
         ${raw(isMgr ? '<button class="btn small" type="button" data-act="edit">Edit</button>' : '')}</div>
       <dl class="facts">
         <dt>Teacher</dt><dd>${e.teacher_name}</dd>
@@ -132,6 +139,12 @@ export async function renderProfile(page, { id }) {
     if (act === 'edit') enrollmentForm(e, reload);
     if (act === 'fee') feePlanForm(e, reload);
     if (act === 'schedule') scheduleForm({ ...e, student_name: s.student_name }, reload);
+    if (act === 'reset') resetSchedule(e, s, reload);
+    if (act === 'share') {
+      api('POST', `/api/enrollments/${e.id}/share-link`, {}).then(r => copyText(
+        `Hi! Here is ${s.student_name.split(' ')[0]}'s Malayalam class page with the teacher, the class calendar, the end date and our terms: ${location.origin}/s/${r.token}`,
+        'Student page message copied — paste it in WhatsApp')).catch(err => toast(err.message, 'error'));
+    }
     if (act === 'report') reportForm(e, reload);
     if (act === 'course-fb') {
       api('POST', `/api/enrollments/${e.id}/feedback-link`).then(r => {
@@ -219,5 +232,44 @@ function reportForm(e, after) {
       await api('PUT', `/api/enrollments/${e.id}/report`, v);
       close(); toast('Report saved'); after();
     }),
+  });
+}
+
+/** Manager: remove all upcoming Scheduled classes of an enrollment from a date, then schedule again. */
+function resetSchedule(e, s, after) {
+  drawer({
+    title: 'Reset schedule',
+    body: html`<form id="rs-form" novalidate>
+      <p><strong>${s.student_name}</strong> · ${e.course} · ${e.class_mode}</p>
+      <p class="muted small">Removes every upcoming <b>Scheduled</b> class from the date you choose. Completed classes and the package count are not touched. Use it before scheduling again with a new slot or teacher.</p>
+      <div class="grid2">
+        <div class="field"><label for="rs-from">From date *</label><input id="rs-from" name="from" type="date" value="${todayLocal()}"></div>
+        <div class="field"><label for="rs-r">Reason *</label><input id="rs-r" name="reason" maxlength="500" placeholder="e.g. Moving to weekends"></div>
+      </div>
+      <div class="fb-box" id="rs-preview" aria-live="polite">Checking…</div>
+    </form>`,
+    foot: '<button class="btn" type="button" data-close>Cancel</button><button class="btn danger" type="submit" form="rs-form" id="rs-go">Remove classes</button>',
+    onMount: (d, close) => {
+      const form = d.querySelector('#rs-form'); let count = 0;
+      const preview = async () => {
+        const from = form.querySelector('#rs-from').value; const box = d.querySelector('#rs-preview');
+        if (!from) { box.textContent = 'Choose a date.'; return; }
+        try {
+          const r = await api('POST', `/api/enrollments/${e.id}/reset-schedule?preview=1`, { from, reason: 'preview' });
+          count = r.count;
+          box.innerHTML = r.count ? `<b>${r.count}</b> upcoming class${r.count === 1 ? '' : 'es'} will be removed (${esc(fmtDT(r.first))} → ${esc(fmtDT(r.last))}).` : 'There are no scheduled classes from this date.';
+          d.querySelector('#rs-go').textContent = r.count ? `Remove ${r.count} class${r.count === 1 ? '' : 'es'}` : 'Nothing to remove';
+          d.querySelector('#rs-go').disabled = !r.count;
+        } catch (err) { box.textContent = err.message; }
+      };
+      form.querySelector('#rs-from').addEventListener('change', preview); preview();
+      onSubmit(form, async v => {
+        if (!v.reason.trim()) throw Object.assign(new Error('Give a short reason'), { data: { field: 'Reason *' } });
+        if (!count) throw new Error('There is nothing to remove');
+        const r = await api('POST', `/api/enrollments/${e.id}/reset-schedule`, v);
+        close(); toast(`${r.removed} class${r.removed === 1 ? '' : 'es'} removed`); after();
+        if (e.status === 'Active') scheduleForm({ ...e, student_name: s.student_name }, after);
+      });
+    },
   });
 }

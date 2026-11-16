@@ -27,7 +27,7 @@ function client() {
     return { status: res.status, data };
   }
   return {
-    get: u => call('GET', u), post: (u, b) => call('POST', u, b), patch: (u, b) => call('PATCH', u, b), put: (u, b) => call('PUT', u, b), del: u => call('DELETE', u),
+    get: u => call('GET', u), post: (u, b) => call('POST', u, b), patch: (u, b) => call('PATCH', u, b), put: (u, b) => call('PUT', u, b), del: (u, b) => call('DELETE', u, b),
     raw: u => fetch(base + u, { headers: cookie ? { Cookie: cookie } : {} }),
     login: async email => { const r = await call('POST', '/api/login', { email, password: pw }); assert.equal(r.status, 200, JSON.stringify(r.data)); return r; },
   };
@@ -744,4 +744,92 @@ test('Monthly report downloads as an Excel workbook (Manager only)', async () =>
   const fees = wb.getWorksheet('Fees collected'); let total = 0;
   fees.eachRow((r, i) => { if (i > 2 && typeof r.getCell(5).value === 'number') total += r.getCell(5).value; });
   assert.equal(total, rep.totals.collected_in_month);
+});
+
+
+test('Round 3: student sorting, payment totals, class change/delete/reset, all-time reports, student page', async () => {
+  // ST-01: newest admission first by default; other sorts
+  const newest = (await M.get('/api/students')).data.filter(r => r.admission_date);
+  for (let i = 1; i < newest.length; i++) assert.ok(newest[i - 1].admission_date >= newest[i].admission_date);
+  const byName = (await M.get('/api/students?sort=name')).data.map(r => r.student_name);
+  const lower = byName.map(n => n.toLowerCase());
+  for (let i = 1; i < lower.length; i++) assert.ok(lower[i - 1].localeCompare(lower[i]) <= 0 || lower[i - 1][0] <= lower[i][0], `${byName[i - 1]} before ${byName[i]}`);
+  const oldest = (await M.get('/api/students?sort=oldest')).data.filter(r => r.admission_date);
+  for (let i = 1; i < oldest.length; i++) assert.ok(oldest[i - 1].admission_date <= oldest[i].admission_date);
+  assert.equal((await M.get('/api/students?sort=nonsense')).status, 200);
+
+  // PY-01: headline figures
+  let r = await M.get('/api/payments');
+  assert.ok(r.data.summary.students >= 1); assert.ok('received' in r.data.summary && 'pending' in r.data.summary && 'overdue_count' in r.data.summary);
+  const paidAll = await db.get(`SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Paid'`);
+  assert.equal(r.data.summary.received, Number(paidAll.n));
+  r = await M.get('/api/payments?date_from=2001-01-01&date_to=2001-01-31');
+  assert.equal(r.data.summary.received, 0); assert.ok(r.data.summary.pending >= 0);
+
+  // CA-01: change teacher (Manager only), delete a scheduled class (reason required), reset schedule
+  const en = await db.get(`SELECT * FROM enrollments WHERE teacher_id = ? AND status = 'Active' ORDER BY id LIMIT 1`, [teacherA]);
+  await M.patch(`/api/enrollments/${en.id}`, { total_classes: en.total_classes + 4 });
+  const made = [];
+  for (const at of ['2026-12-01T07:00', '2026-12-02T07:00', '2026-12-03T07:00']) {
+    const k = await M.post('/api/classes', { enrollment_id: en.id, scheduled_at: at, duration_min: 30, acknowledge_warnings: true });
+    assert.equal(k.status, 201, JSON.stringify(k.data)); made.push(k.data[0]);
+  }
+  const otherTeacher = (await db.get(`SELECT id FROM teachers WHERE id <> ? AND active = 1 AND supports_1to1 = 1 ORDER BY id LIMIT 1`, [teacherA]));
+  if (otherTeacher) {
+    assert.equal((await T1.patch(`/api/classes/${made[0].id}`, { teacher_id: otherTeacher.id, acknowledge_warnings: true })).status, 403);
+    r = await M.patch(`/api/classes/${made[0].id}`, { teacher_id: otherTeacher.id, acknowledge_warnings: true });
+    assert.equal(r.status, 200, JSON.stringify(r.data)); assert.equal(r.data.teacher_id, otherTeacher.id);
+  }
+  assert.equal((await T1.del(`/api/classes/${made[1].id}`, {})).status, 400); // reason required
+  r = await T1.del(`/api/classes/${made[1].id}`, { reason: 'Parent asked to skip' });
+  assert.equal(r.status, 200);
+  assert.equal((await db.get('SELECT COUNT(*) n FROM classes WHERE id = ?', [made[1].id])).n, 0);
+  const done = await db.get(`SELECT id FROM classes WHERE status = 'Completed' LIMIT 1`);
+  assert.equal((await M.del(`/api/classes/${done.id}`, { reason: 'x' })).status, 400); // completed classes stay
+  const hist = (await M.get(`/api/enrollments/${en.id}`)).data.history;
+  assert.ok(hist.some(h => h.action === 'class_deleted' && h.reason === 'Parent asked to skip'));
+  // Reset: preview then remove; Manager only; completed classes untouched
+  const completedBefore = (await db.get('SELECT completed_classes FROM enrollments WHERE id = ?', [en.id])).completed_classes;
+  assert.equal((await T1.post(`/api/enrollments/${en.id}/reset-schedule`, { from: '2026-12-01', reason: 'x' })).status, 403);
+  r = await M.post(`/api/enrollments/${en.id}/reset-schedule?preview=1`, { from: '2026-12-01', reason: 'preview' });
+  assert.equal(r.data.count, 2);
+  r = await M.post(`/api/enrollments/${en.id}/reset-schedule`, { from: '2026-12-01', reason: 'Moving to weekends' });
+  assert.equal(r.data.removed, 2);
+  assert.equal((await db.get(`SELECT COUNT(*) n FROM classes WHERE enrollment_id = ? AND scheduled_at >= '2026-12-01'`, [en.id])).n, 0);
+  assert.equal((await db.get('SELECT completed_classes FROM enrollments WHERE id = ?', [en.id])).completed_classes, completedBefore);
+
+  // RP-01: all time
+  const all = (await M.get('/api/reports?month=all')).data;
+  const sumPaid = Number((await db.get(`SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Paid'`)).n);
+  assert.equal(all.month, 'all'); assert.equal(all.totals.collected_in_month, sumPaid);
+  assert.equal(all.totals.admissions_in_month, Number((await db.get('SELECT COUNT(*) n FROM enrollments')).n));
+  const xr = await M.raw('/api/reports/export?month=all');
+  assert.equal(xr.status, 200); assert.match(xr.headers.get('content-disposition'), /report-all-time\.xlsx/);
+  const ExcelJS = require('exceljs'); const wb = new ExcelJS.Workbook(); await wb.xlsx.load(Buffer.from(await xr.arrayBuffer()));
+  assert.deepEqual(wb.worksheets.map(w => w.name).slice(0, 3), ['Summary', 'By month', 'Pre-tests']);
+
+  // AD-02: teacher about + photo, share link, public page, terms
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8ffff3f0005fe02fea7d6a5e10000000049454e44ae426082', 'hex').toString('base64');
+  assert.equal((await M.patch(`/api/teachers/${teacherA}`, { about: '8 years teaching Malayalam.' })).status, 200);
+  assert.equal((await M.put(`/api/teachers/${teacherA}/photo`, { mime: 'image/png', data: png })).status, 200);
+  assert.equal((await M.put(`/api/teachers/${teacherA}/photo`, { mime: 'image/png', data: Buffer.from('nope').toString('base64') })).status, 400);
+  const tl = (await M.get('/api/teachers')).data.find(t => t.id === teacherA);
+  assert.equal(tl.has_photo, true); assert.equal(tl.photo, undefined);
+  assert.equal((await S.post(`/api/enrollments/${en.id}/share-link`, {})).status, 403);
+  r = await T1.post(`/api/enrollments/${en.id}/share-link`, {}); assert.equal(r.status, 201);
+  const tok = r.data.token;
+  assert.equal((await M.post(`/api/enrollments/${en.id}/share-link`, {})).data.token, tok);
+  await M.put('/api/settings/terms', { terms: 'Rule one\nIf more than 2 classes are skipped by the student, extra classes are charged.' });
+  const page = (await anon.get(`/api/public/student/${tok}`)).data;
+  assert.equal(page.teacher.about, '8 years teaching Malayalam.'); assert.equal(page.teacher.photo, true);
+  assert.equal(page.terms.length, 2); assert.equal(page.end_date, (await db.get('SELECT end_date FROM enrollments WHERE id = ?', [en.id])).end_date);
+  assert.ok(Array.isArray(page.classes)); assert.equal(page.phone, undefined); assert.equal(page.total_fee, undefined);
+  assert.equal((await anon.raw(`/api/public/student/${tok}/teacher-photo`)).status, 200);
+  assert.equal((await anon.get('/api/public/student/wrong-token')).status, 404);
+  // Manager can renew the link; the old one stops working
+  const renewed = (await M.post(`/api/enrollments/${en.id}/share-link`, { renew: true })).data.token;
+  assert.notEqual(renewed, tok);
+  assert.equal((await anon.get(`/api/public/student/${tok}`)).status, 404);
+  await M.put('/api/settings/terms', { terms: '' });
+  assert.equal((await anon.get(`/api/public/student/${renewed}`)).data.terms.length, 5); // back to the default
 });

@@ -22,6 +22,7 @@ function createApp(db) {
   });
   // Test-paper uploads arrive as base64 JSON (4 MB file -> ~5.4 MB); everything else stays small.
   app.use('/api/candidates/:id/files', express.json({ limit: '6mb' }));
+  app.use('/api/teachers/:id/photo', express.json({ limit: '3mb' }));
   app.use(express.json({ limit: '200kb' }));
   app.use(cookieParser());
 
@@ -47,6 +48,7 @@ function createApp(db) {
 
   // Parents' feedback page works without a login (the link's random token is the key).
   require('./routes/feedback').publicRoutes(app, ctx);
+  require('./routes/student-page').publicRoutes(app, ctx);
   app.use('/api', requireAuth);
   require('./routes/users')(app, ctx);
   require('./routes/teachers')(app, ctx);
@@ -57,10 +59,12 @@ function createApp(db) {
   require('./routes/settings')(app, ctx);
   require('./routes/notifications')(app, ctx);
   require('./routes/feedback')(app, ctx);
+  require('./routes/student-page')(app, ctx);
 
   app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Not found')));
   app.use(express.static(path.join(__dirname, '..', 'public'), { index: 'index.html', maxAge: '1h' }));
   app.get('/f/:token', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'feedback.html')));
+  app.get('/s/:token', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'student.html')));
   app.get(/^\/(?!api\/).*/, (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
 
   // eslint-disable-next-line no-unused-vars

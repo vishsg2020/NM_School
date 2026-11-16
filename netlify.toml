@@ -41,6 +41,12 @@
   to = "/feedback.html"
   status = 200
 
+# Parents' student page (no login).
+[[redirects]]
+  from = "/s/*"
+  to = "/student.html"
+  status = 200
+
 # Single-page app: every other path loads the app shell.
 [[redirects]]
   from = "/*"

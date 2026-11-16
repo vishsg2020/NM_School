@@ -92,7 +92,7 @@ module.exports = (app, { db }) => {
     res.json({ role, today: t, month, metrics, today_classes, upcoming_pretests });
   });
 
-  const pickMonth = q => (/^\d{4}-\d{2}$/.test(q || '') ? q : thisMonth());
+  const pickMonth = q => (q === 'all' || /^\d{4}-\d{2}$/.test(q || '') ? q : thisMonth());
   app.get('/api/reports', requireRole('manager'), async (req, res) => res.json(await reportData(pickMonth(req.query.month))));
 
   // Monthly report as an Excel workbook, to download and keep as a record.
@@ -101,7 +101,7 @@ module.exports = (app, { db }) => {
     const buf = await require('../report-export').buildWorkbook(db, await reportData(month), month, req.user);
     res.set({
       'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'Content-Disposition': `attachment; filename="Nalla-Malayalam-report-${month}.xlsx"`,
+      'Content-Disposition': `attachment; filename="Nalla-Malayalam-report-${month === 'all' ? 'all-time' : month}.xlsx"`,
       'Cache-Control': 'no-store',
     });
     res.send(buf);
@@ -109,7 +109,13 @@ module.exports = (app, { db }) => {
 
   async function reportData(month) {
     const t = today();
-    const months = monthsBack(6, month);
+    // All time: one bar per month since the first record (at most 24); otherwise the 6 months up to the chosen one.
+    let months = monthsBack(6, month === 'all' ? thisMonth() : month);
+    if (month === 'all') {
+      const first = (await db.get(`SELECT MIN(substr(created_at,1,7)) m FROM candidates`)).m || thisMonth();
+      const n = Math.min(24, Math.max(1, (Number(thisMonth().slice(0, 4)) - Number(first.slice(0, 4))) * 12 + Number(thisMonth().slice(5)) - Number(first.slice(5)) + 1));
+      months = monthsBack(n, thisMonth());
+    }
 
     const byMonth = async sql => {
       const rows = await db.all(sql, { months });
@@ -129,10 +135,10 @@ module.exports = (app, { db }) => {
     // Workload: a "session" = one teacher time slot (a 3:1 group with 3 students = 1 session).
     let teacher_workload = (await db.all(`
       SELECT t.id, t.name, t.active, t.employment_type, t.monthly_capacity,
-        (SELECT COUNT(DISTINCT scheduled_at) FROM classes WHERE teacher_id=t.id AND substr(scheduled_at,1,7)=@month AND status NOT IN ('Cancelled','Rescheduled')) AS planned_sessions,
-        (SELECT COUNT(*) FROM classes WHERE teacher_id=t.id AND format='1:1' AND counted=1 AND substr(scheduled_at,1,7)=@month) AS completed_1to1_classes,
-        (SELECT COUNT(DISTINCT scheduled_at) FROM classes WHERE teacher_id=t.id AND format='3:1' AND counted=1 AND substr(scheduled_at,1,7)=@month) AS completed_3to1_sessions,
-        (SELECT COUNT(*) FROM classes WHERE teacher_id=t.id AND status='Teacher Absent' AND substr(scheduled_at,1,7)=@month) AS teacher_absences,
+        (SELECT COUNT(DISTINCT scheduled_at) FROM classes WHERE teacher_id=t.id AND (@month = 'all' OR substr(scheduled_at,1,7) = @month) AND status NOT IN ('Cancelled','Rescheduled')) AS planned_sessions,
+        (SELECT COUNT(*) FROM classes WHERE teacher_id=t.id AND format='1:1' AND counted=1 AND (@month = 'all' OR substr(scheduled_at,1,7) = @month)) AS completed_1to1_classes,
+        (SELECT COUNT(DISTINCT scheduled_at) FROM classes WHERE teacher_id=t.id AND format='3:1' AND counted=1 AND (@month = 'all' OR substr(scheduled_at,1,7) = @month)) AS completed_3to1_sessions,
+        (SELECT COUNT(*) FROM classes WHERE teacher_id=t.id AND status='Teacher Absent' AND (@month = 'all' OR substr(scheduled_at,1,7) = @month)) AS teacher_absences,
         (SELECT COUNT(*) FROM enrollments WHERE teacher_id=t.id AND status='Active') AS active_enrollments
       FROM teachers t ORDER BY t.active DESC, t.name`, { month }));
     const allHours = await db.all('SELECT teacher_id, start_time, end_time FROM teacher_hours');
@@ -168,17 +174,17 @@ module.exports = (app, { db }) => {
     // (collected = Paid payments whose received date falls in the month, for that rep's admissions).
     const by_sales_rep = (await db.all(`
       SELECT u.id, u.name, u.role,
-        (SELECT COUNT(*) FROM candidates c WHERE c.sales_rep_id=u.id AND substr(c.created_at,1,7)=@month) AS candidates_added,
-        (SELECT COUNT(*) FROM enrollments e WHERE e.sales_rep_id=u.id AND substr(e.admission_date,1,7)=@month) AS admissions,
-        (SELECT COALESCE(SUM(e.total_fee),0) FROM enrollments e WHERE e.sales_rep_id=u.id AND substr(e.admission_date,1,7)=@month) AS admitted_fee_value,
+        (SELECT COUNT(*) FROM candidates c WHERE c.sales_rep_id=u.id AND (@month = 'all' OR substr(c.created_at,1,7) = @month)) AS candidates_added,
+        (SELECT COUNT(*) FROM enrollments e WHERE e.sales_rep_id=u.id AND (@month = 'all' OR substr(e.admission_date,1,7) = @month)) AS admissions,
+        (SELECT COALESCE(SUM(e.total_fee),0) FROM enrollments e WHERE e.sales_rep_id=u.id AND (@month = 'all' OR substr(e.admission_date,1,7) = @month)) AS admitted_fee_value,
         (SELECT COALESCE(SUM(p.amount),0) FROM payments p JOIN enrollments e ON e.id=p.enrollment_id
-           WHERE e.sales_rep_id=u.id AND p.status='Paid' AND substr(p.date,1,7)=@month) AS collected_in_month
+           WHERE e.sales_rep_id=u.id AND p.status='Paid' AND (@month = 'all' OR substr(p.date,1,7) = @month)) AS collected_in_month
       FROM users u WHERE u.role IN ('sales','manager') ORDER BY collected_in_month DESC, u.name`, { month }))
       .filter(r => r.candidates_added || r.admissions || r.collected_in_month || r.role === 'sales');
 
     const totals = await many({
-      collected_in_month: `SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Paid' AND substr(date,1,7)=@month`,
-      admissions_in_month: `SELECT COUNT(*) n FROM enrollments WHERE substr(admission_date,1,7)=@month`,
+      collected_in_month: `SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Paid' AND (@month = 'all' OR substr(date,1,7) = @month)`,
+      admissions_in_month: `SELECT COUNT(*) n FROM enrollments WHERE (@month = 'all' OR substr(admission_date,1,7) = @month)`,
       pending_total: `SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Pending'`,
       overdue_total: `SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Pending' AND date < @t`,
     }, { month, t });

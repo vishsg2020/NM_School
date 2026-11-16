@@ -1,14 +1,14 @@
 import { api, get, esc, html, raw, pill, onSubmit, toast, fmtStamp, confirmBox, copyText } from '../core.js';
 
 export async function render(page, { query }) {
-  const [g, fb] = await Promise.all([get('/api/settings/google'), get('/api/settings/feedback')]);
+  const [g, fb, terms] = await Promise.all([get('/api/settings/google'), get('/api/settings/feedback'), get('/api/settings/terms')]);
   const account = g.account_email || g.suggested_account;
   const status = g.connected
     ? (g.last_error ? pill('Needs attention', 'red') : pill('Connected', 'green'))
     : pill('Not connected', 'amber');
 
   page.innerHTML = html`<div class="page-head"><div><h1>Settings</h1>
-      <div class="sub">Parent feedback and the Google account used for Meet links.</div></div></div>
+      <div class="sub">Parent feedback, student page terms and the Google account used for Meet links.</div></div></div>
     ${raw(query.google === 'connected' ? '<div class="notice info" role="status">Google account connected. New confirmed pre-tests will get a Meet link.</div>' : '')}
     ${raw(query.google === 'error' ? `<div class="notice error" role="alert">Could not connect Google: ${esc(query.msg || 'unknown error')}</div>` : '')}
 
@@ -30,6 +30,14 @@ export async function render(page, { query }) {
           ${raw(['every', 'weekly', 'off'].map(v => `<option value="${v}" ${fb.frequency === v ? 'selected' : ''}>${{ every: 'After every class', weekly: 'At most once a week per student', off: 'Off' }[v]}</option>`).join(''))}
         </select></div>
         <button class="btn" type="submit">Save</button>
+      </form>
+    </section>
+
+    <section class="panel"><h2>Terms on the student page</h2>
+      <p class="small muted">Shown to parents on the student page link (one rule per line, numbered automatically).</p>
+      <form id="terms-form" novalidate>
+        <div class="field"><label for="terms-t">Terms</label><textarea id="terms-t" name="terms" rows="7" maxlength="3000">${terms.terms}</textarea></div>
+        <div class="row"><button class="btn" type="submit">Save terms</button><button class="btn" type="button" id="terms-default">Use the default text</button></div>
       </form>
     </section>
 
@@ -68,6 +76,8 @@ export async function render(page, { query }) {
     if (!ok) return;
     await api('DELETE', '/api/settings/google/connection'); toast('Google disconnected'); reload();
   });
+  onSubmit(page.querySelector('#terms-form'), async v => { await api('PUT', '/api/settings/terms', v); toast('Terms saved'); });
+  page.querySelector('#terms-default').addEventListener('click', () => { page.querySelector('#terms-t').value = terms.default; });
   onSubmit(page.querySelector('#fb-form'), async v => { await api('PUT', '/api/settings/feedback', v); toast('Feedback setting saved'); });
   onSubmit(page.querySelector('#g-form'), async v => {
     await api('PUT', '/api/settings/google', v);

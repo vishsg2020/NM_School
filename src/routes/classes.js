@@ -196,6 +196,42 @@ module.exports = (app, { db }) => {
   });
 
   // Update schedule and/or record class activity.
+  // Delete one class that has not happened yet (still Scheduled). Completed classes are the record and stay.
+  app.delete('/api/classes/:id', requireRole('manager', 'teacher'), async (req, res) => {
+    const id = idParam(req.params.id);
+    const first = await db.get('SELECT * FROM classes WHERE id = ?', [id]);
+    if (!first || !own(req.user, first)) throw notFound('Class');
+    const reason = str(req.body?.reason, { required: true, name: 'Reason', max: 500 });
+    await db.tx(async t => {
+      const cl = await t.get('SELECT * FROM classes WHERE id = ? FOR UPDATE', [id]);
+      if (cl.status !== 'Scheduled' || cl.counted) throw bad('Only classes that are still Scheduled can be deleted');
+      await t.run('DELETE FROM classes WHERE id = ?', [id]);
+      await audit(t, req.user, 'enrollment', cl.enrollment_id, 'class_deleted', cl, null, reason);
+    });
+    res.json({ ok: true });
+  });
+
+  // Reset schedule (Manager): remove every upcoming Scheduled class of an enrollment from a date, to schedule again.
+  app.post('/api/enrollments/:id/reset-schedule', requireRole('manager'), async (req, res) => {
+    const e = await db.get('SELECT * FROM enrollments WHERE id = ?', [idParam(req.params.id)]);
+    if (!e) throw notFound('Enrollment');
+    const from = str(req.body.from, { required: true, name: 'From date', max: 10 });
+    if (!isValidDate(from)) throw bad('From date is not valid', { field: 'From date' });
+    const reason = str(req.body.reason, { required: true, name: 'Reason', max: 500 });
+    const where = `enrollment_id = ? AND status = 'Scheduled' AND counted = 0 AND substr(scheduled_at,1,10) >= ?`;
+    if (bool(req.query.preview)) {
+      const r = await db.get(`SELECT COUNT(*) n, MIN(scheduled_at) first, MAX(scheduled_at) last FROM classes WHERE ${where}`, [e.id, from]);
+      return res.json({ count: r.n, first: r.first, last: r.last });
+    }
+    const removed = await db.tx(async t => {
+      await t.get('SELECT id FROM enrollments WHERE id = ? FOR UPDATE', [e.id]);
+      const gone = await t.all(`DELETE FROM classes WHERE ${where} RETURNING class_code, scheduled_at`, [e.id, from]);
+      await audit(t, req.user, 'enrollment', e.id, 'schedule_reset', { from, classes: gone.map(g => `${g.class_code} ${g.scheduled_at}`) }, null, reason);
+      return gone.length;
+    });
+    res.json({ removed });
+  });
+
   app.patch('/api/classes/:id', requireRole('manager', 'teacher'), async (req, res) => {
     const id = idParam(req.params.id);
     const first = await db.get('SELECT * FROM classes WHERE id = ?', [id]);
@@ -209,14 +245,19 @@ module.exports = (app, { db }) => {
       const c = { ...before };
       const enrollment = await t.get('SELECT * FROM enrollments WHERE id = ?', [before.enrollment_id]);
 
-      if (b.scheduled_at !== undefined || b.duration_min !== undefined) {
+      if (b.scheduled_at !== undefined || b.duration_min !== undefined || b.teacher_id !== undefined) {
         if (before.status !== 'Scheduled') throw bad('Only Scheduled classes can be moved');
+        if (b.teacher_id !== undefined && Number(b.teacher_id) !== before.teacher_id) {
+          if (!isMgr) throw forbidden('Only the Manager can change the teacher of a class');
+          c.teacher_id = int(b.teacher_id, { min: 1, required: true, name: 'Teacher' });
+        }
         if (b.scheduled_at !== undefined) {
           if (!isValidDateTime(b.scheduled_at)) throw bad('Class date/time is not valid');
           c.scheduled_at = b.scheduled_at;
         }
         if (b.duration_min !== undefined) c.duration_min = int(b.duration_min, { min: 5, max: 240, required: true, name: 'Duration' });
         const teacher = await t.get('SELECT * FROM teachers WHERE id = ? FOR UPDATE', [c.teacher_id]);
+        if (!teacher) throw bad('Teacher not found');
         const r = await checkSlot(t, { enrollment, teacher, start: c.scheduled_at, duration: c.duration_min, excludeId: before.id });
         if (r.errors.length) throw conflict(r.errors.join('; '), { code: 'SCHEDULE_CONFLICT', results: [{ scheduled_at: c.scheduled_at, ...r }] });
         if (r.warnings.length && !bool(b.acknowledge_warnings)) throw conflict('Please review the scheduling warnings', { code: 'NEEDS_ACK', results: [{ scheduled_at: c.scheduled_at, ...r }], general: [] });
@@ -245,7 +286,7 @@ module.exports = (app, { db }) => {
         c.recorded_by = req.user.id; c.recorded_at = new Date().toISOString();
       }
 
-      await t.run(`UPDATE classes SET scheduled_at=@scheduled_at, duration_min=@duration_min, status=@status, attendance=@attendance,
+      await t.run(`UPDATE classes SET scheduled_at=@scheduled_at, duration_min=@duration_min, teacher_id=@teacher_id, status=@status, attendance=@attendance,
         topics=@topics, homework=@homework, notes=@notes, progress=@progress, next_class_date=@next_class_date,
         rating_participation=@rating_participation, rating_homework=@rating_homework, rating_progress=@rating_progress, parent_note=@parent_note,
         recorded_by=@recorded_by, recorded_at=@recorded_at, updated_at=now_iso() WHERE id=@id`, c);

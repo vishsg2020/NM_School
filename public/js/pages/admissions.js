@@ -268,6 +268,14 @@ export function openAdmission(s, after) {
 
 // ---------- Payments ----------
 const PAY_KEYS = ['q', 'status', 'stage', 'date_from', 'date_to'];
+// First / last day of this month (offset 0) or an earlier month (offset -1 …), in IST.
+function monthStart(offset) {
+  const [y, m] = todayLocal().split('-').map(Number);
+  const d = new Date(Date.UTC(y, m - 1 + offset, 1));
+  return d.toISOString().slice(0, 10);
+}
+function monthEnd(offset) { return addDays(monthStart(offset + 1), -1); }
+
 export async function renderPayments(page, { query }) {
   const f = Object.fromEntries(PAY_KEYS.map(k => [k, query[k] || '']));
   page.innerHTML = html`<div class="page-head"><div><h1>Payments</h1>
@@ -280,6 +288,12 @@ export async function renderPayments(page, { query }) {
       <div class="field"><label for="p-to">Date to</label><input id="p-to" name="date_to" type="date" value="${f.date_to}"></div>
       <button class="btn" type="button" id="p-clear">Clear filters</button>
     </form>
+    <div class="chips" id="p-range" role="group" aria-label="Date range">
+      <button type="button" class="rchip" data-range="this">This month</button>
+      <button type="button" class="rchip" data-range="last">Last month</button>
+      <button type="button" class="rchip" data-range="all">All time</button>
+    </div>
+    <div class="kpis" id="p-kpis" aria-live="polite"></div>
     <p class="result-count" id="p-tot" aria-live="polite"></p>
     <div id="p-list">${raw(stateBox('loading'))}</div>`;
   const form = page.querySelector('#pf'); const list = page.querySelector('#p-list');
@@ -292,6 +306,14 @@ export async function renderPayments(page, { query }) {
       const r = await get('/api/payments' + '?' + new URLSearchParams(Object.entries(d).filter(([, v]) => v)));
       if (my !== seq) return;
       rows = r.rows;
+      const sm = r.summary; const rangeLabel = d.date_from || d.date_to ? `${d.date_from ? fmtDate(d.date_from) : 'start'} – ${d.date_to ? fmtDate(d.date_to) : 'today'}` : 'all time';
+      page.querySelector('#p-kpis').innerHTML = `
+        <a class="kpi" href="#/students"><span class="l">Students</span><span class="v">${sm.students}</span><span class="s">with an enrollment</span></a>
+        <div class="kpi"><span class="l">Received</span><span class="v">${esc(inr(sm.received))}</span><span class="s">${sm.received_count} payments · ${esc(rangeLabel)}</span></div>
+        <a class="kpi" href="#/payments?status=Pending"><span class="l">Pending (all)</span><span class="v">${esc(inr(sm.pending))}</span><span class="s">${sm.pending_count} payments</span></a>
+        <a class="kpi ${sm.overdue ? 'bad' : ''}" href="#/payments?status=Overdue"><span class="l">Overdue</span><span class="v">${esc(inr(sm.overdue))}</span><span class="s">${sm.overdue_count} payments</span></a>`;
+      const which = !d.date_from && !d.date_to ? 'all' : d.date_from === monthStart(0) && d.date_to === monthEnd(0) ? 'this' : d.date_from === monthStart(-1) && d.date_to === monthEnd(-1) ? 'last' : '';
+      page.querySelectorAll('[data-range]').forEach(b => b.classList.toggle('on', b.dataset.range === which));
       page.querySelector('#p-tot').textContent = `${r.totals.count} payment${r.totals.count === 1 ? '' : 's'} · Paid ${inr(r.totals.paid)} · Pending ${inr(r.totals.pending)} · Overdue ${inr(r.totals.overdue)}`;
       list.innerHTML = table([
         { label: 'Student', cell: x => `<a href="#/student/${x.student_id}">${esc(x.student_name)}</a><span class="sub">${esc(x.lead_id)} · ${esc(x.course)}</span>` },
@@ -308,6 +330,13 @@ export async function renderPayments(page, { query }) {
   let t;
   form.addEventListener('input', e => { clearTimeout(t); t = setTimeout(load, e.target.type === 'search' ? 250 : 0); });
   form.addEventListener('submit', e => { e.preventDefault(); load(); });
+  page.querySelector('#p-range').addEventListener('click', e => {
+    const b = e.target.closest('[data-range]'); if (!b) return;
+    const off = { this: 0, last: -1 }[b.dataset.range];
+    form.querySelector('#p-from').value = off === undefined ? '' : monthStart(off);
+    form.querySelector('#p-to').value = off === undefined ? '' : monthEnd(off);
+    load();
+  });
   page.querySelector('#p-clear').addEventListener('click', () => { form.reset(); form.querySelectorAll('input,select').forEach(x => { x.value = ''; }); load(); });
   list.addEventListener('click', async e => {
     const p = e.target.closest('[data-pay]'); const h = e.target.closest('[data-hist]');

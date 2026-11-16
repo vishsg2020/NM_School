@@ -71,7 +71,10 @@ export async function renderActivity(page, { query }) {
           + (r.feedback_rating ? `<span class="sub">Parent ${starsText(r.feedback_rating)}</span>` : r.feedback_token && !r.feedback_at ? '<span class="sub">Feedback link sent</span>' : '') },
         { label: 'Topics', cell: r => esc(r.topics || '—') },
         { label: 'Remaining', cls: 'num', cell: r => `${r.remaining_classes} <span class="sub">of ${r.total_classes}</span>` },
-        { label: 'Actions', cls: 'cell-actions', cell: r => `<button class="btn small ${r.status === 'Scheduled' ? 'primary' : ''}" type="button" data-open="${r.id}">${r.status === 'Scheduled' ? 'Record' : 'View'}</button>` },
+        { label: 'Actions', cls: 'cell-actions', cell: r => `<button class="btn small ${r.status === 'Scheduled' ? 'primary' : ''}" type="button" data-open="${r.id}">${r.status === 'Scheduled' ? 'Record' : 'View'}</button>`
+          + (r.status === 'Scheduled' ? ` <details class="rowmenu"><summary class="btn small" aria-label="More actions for ${esc(r.class_code)}">⋯</summary><div class="rowmenu-list">
+              <button type="button" data-open="${r.id}" data-focus="change">Change date / time${isMgr ? ' / teacher' : ''}</button>
+              <button type="button" class="danger-text" data-del="${r.id}">Delete this class</button></div></details>` : '') },
       ], rows, n ? { empty: 'No classes match these filters', emptyHint: ' Try clearing a filter.' } : { empty: 'No classes yet', emptyHint: ' Schedule classes from a student profile.' });
     } catch (e) { if (my === seq) list.innerHTML = stateBox('error', 'Could not load classes', e.message); }
   }
@@ -79,7 +82,12 @@ export async function renderActivity(page, { query }) {
   form.addEventListener('input', e => { clearTimeout(t); t = setTimeout(load, e.target.type === 'search' ? 250 : 0); });
   form.addEventListener('submit', e => { e.preventDefault(); load(); });
   page.querySelector('#c-clear').addEventListener('click', () => { form.querySelectorAll('input,select').forEach(x => { x.value = ''; }); load(); });
-  list.addEventListener('click', e => { const b = e.target.closest('[data-open]'); if (b) activityForm(b.dataset.open, load); });
+  list.addEventListener('click', e => {
+    const del = e.target.closest('[data-del]');
+    if (del) { del.closest('details')?.removeAttribute('open'); deleteClass(rows.find(r => String(r.id) === del.dataset.del), load); return; }
+    const b = e.target.closest('[data-open]');
+    if (b) { b.closest('details')?.removeAttribute('open'); activityForm(b.dataset.open, load, { focus: b.dataset.focus }); }
+  });
   await load();
   if (query.open) activityForm(query.open, load);
 }
@@ -135,7 +143,25 @@ async function monthView(page, list, form, month, isMgr) {
   list.querySelectorAll('.mhead a').forEach(a => { a.href += extra; });
 }
 
-export async function activityForm(id, after) {
+/** Delete one Scheduled class (asks for a reason; kept in the enrollment history). */
+export function deleteClass(c, after) {
+  drawer({
+    title: 'Delete this class?',
+    body: html`<form id="del-form" novalidate>
+      <p><strong>${c.class_code}</strong> · ${c.student_name} · ${fmtDT(c.scheduled_at)}</p>
+      <p class="muted small">The class is removed from the schedule. It was not completed, so the package count does not change.</p>
+      <div class="field"><label for="del-r">Reason *</label><input id="del-r" name="reason" maxlength="500" placeholder="e.g. Parent asked to skip this week"></div>
+    </form>`,
+    foot: '<button class="btn" type="button" data-close>Cancel</button><button class="btn danger" type="submit" form="del-form">Delete class</button>',
+    onMount: (d, close) => onSubmit(d.querySelector('#del-form'), async v => {
+      if (!v.reason.trim()) throw Object.assign(new Error('Give a short reason'), { data: { field: 'Reason *' } });
+      await api('DELETE', `/api/classes/${c.id}`, { reason: v.reason });
+      close(); toast(`${c.class_code} deleted`); after && after();
+    }),
+  });
+}
+
+export async function activityForm(id, after, { focus } = {}) {
   const c = await get('/api/classes/' + id);
   const isMgr = can('manager');
   const lockedStatus = c.status === 'Completed' && !isMgr;
@@ -172,12 +198,15 @@ export async function activityForm(id, after) {
       ${raw(c.status === 'Completed' ? `<div class="fb-box" id="fb-box">${c.feedback_at
         ? (c.feedback_rating ? `<div class="q">Parent feedback · ${esc(new Date(c.feedback_at).toLocaleDateString('en-IN'))}</div>${starsText(c.feedback_rating)}${c.feedback_tags ? ` · ${esc(c.feedback_tags)}` : ''}${c.feedback_comment ? `<div>“${esc(c.feedback_comment)}”</div>` : ''}` : '<div class="q">Parent feedback received.</div>')
         : `<div class="row"><span>${c.feedback_token ? 'Feedback link created, not answered yet.' : 'Ask the parent how the class went.'}</span><span class="spacer"></span><button class="btn small" type="button" id="fb-link">Copy feedback link for parent</button></div>`}</div>` : '')}
-      ${raw(c.status === 'Scheduled' ? html`<fieldset><legend>Move this class</legend>
+      ${raw(c.status === 'Scheduled' ? html`<fieldset id="change-box"><legend>Change date / time${raw(isMgr ? ' / teacher' : '')}</legend>
         <div class="grid3">
           <div class="field"><label for="a-d">Date</label><input id="a-d" name="new_date" type="date" value="${c.scheduled_at.slice(0, 10)}"></div>
           <div class="field"><label for="a-t">Time</label><input id="a-t" name="new_time" type="time" value="${c.scheduled_at.slice(11, 16)}"></div>
           <div class="field"><label for="a-dur">Minutes</label><input id="a-dur" name="duration_min" type="number" min="5" max="240" value="${c.duration_min}"></div>
-        </div></fieldset>` : '')}
+        </div>
+        ${raw(isMgr ? `<div class="field"><label for="a-teach">Teacher</label><select id="a-teach" name="new_teacher">${teacherOptions(c.teacher_id, { mode: c.format, blank: null })}</select><div class="hint">For a substitute on this class only.</div></div>` : '')}
+        <div class="row"><span class="spacer"></span><button class="btn small danger" type="button" id="del-class">Delete this class</button></div>
+        </fieldset>` : '')}
       ${raw(isMgr && c.status === 'Completed' ? '<div class="field"><label for="a-reason">Reason for correction</label><input id="a-reason" name="reason" maxlength="500"></div>' : '')}
       <div id="ack-box"></div>
     </form>`,
@@ -185,6 +214,8 @@ export async function activityForm(id, after) {
     onMount: (d, close) => {
       const form = d.querySelector('#act-form');
       const st = form.querySelector('#a-st'); const att = form.querySelector('#a-att');
+      d.querySelector('#del-class')?.addEventListener('click', () => { close(); deleteClass(c, after); });
+      if (focus === 'change' && d.querySelector('#change-box')) { d.querySelector('#change-box').scrollIntoView({ block: 'center' }); d.querySelector('#a-d').focus(); }
       wireStars(form);
       const rateBox = form.querySelector('#rate-box');
       const syncRate = () => rateBox.classList.toggle('hidden', !['Completed'].includes(st.value) && !c.rating_participation);
@@ -206,9 +237,11 @@ export async function activityForm(id, after) {
         const body = { attendance: v.attendance || null, topics: v.topics, homework: v.homework, progress: v.progress, notes: v.notes, next_class_date: v.next_class_date, reason: v.reason,
           rating_participation: v.rating_participation ?? null, rating_homework: v.rating_homework ?? null, rating_progress: v.rating_progress ?? null, parent_note: v.parent_note };
         if (!lockedStatus) body.status = v.status;
-        if (v.new_date && (`${v.new_date}T${v.new_time}` !== c.scheduled_at || Number(v.duration_min) !== c.duration_min)) {
-          if (v.status !== 'Scheduled') throw new Error('Move the class or change its status, not both at once');
+        const teacherChanged = v.new_teacher && Number(v.new_teacher) !== c.teacher_id;
+        if (v.new_date && (`${v.new_date}T${v.new_time}` !== c.scheduled_at || Number(v.duration_min) !== c.duration_min || teacherChanged)) {
+          if (v.status !== 'Scheduled') throw new Error('Change the class or change its status, not both at once');
           body.scheduled_at = `${v.new_date}T${v.new_time}`; body.duration_min = v.duration_min;
+          if (teacherChanged) body.teacher_id = v.new_teacher;
         }
         if (body.status === 'Completed' && !['Present', 'Late'].includes(body.attendance)) throw new Error('A Completed class needs attendance Present or Late');
         body.acknowledge_warnings = ack;

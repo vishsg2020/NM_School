@@ -6,7 +6,7 @@ const GREEN = 'FF2E6A1C';
 const SOFT = 'FFEAF5E3';
 const MONEY = '"₹"#,##0';
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-const monthName = m => `${MONTHS[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`;
+const monthName = m => (m === 'all' ? 'All time' : `${MONTHS[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`);
 
 /** Adds a sheet with a styled header row, frozen header and filters. cols: [{ header, key, width, money?, num? }] */
 function sheet(wb, name, cols, rows, note) {
@@ -35,39 +35,39 @@ async function buildWorkbook(db, data, month, user) {
          t.name AS teacher, r.name AS sales_rep, pr.recommended_course, pr.admission_status, pr.followup_date
        FROM candidates c JOIN users r ON r.id = c.sales_rep_id LEFT JOIN teachers t ON t.id = c.pretest_teacher_id
        LEFT JOIN pretest_results pr ON pr.candidate_id = c.id
-       WHERE substr(c.created_at,1,7) = @month OR substr(c.pretest_at,1,7) = @month ORDER BY c.pretest_at NULLS LAST, c.id`),
+       WHERE (@month = 'all' OR substr(c.created_at,1,7) = @month) OR (@month = 'all' OR substr(c.pretest_at,1,7) = @month) ORDER BY c.pretest_at NULLS LAST, c.id`),
     q(`SELECT e.admission_date, s.student_code, e.lead_id, c.student_name, e.course, e.class_mode, t.name AS teacher, r.name AS sales_rep,
          e.start_date, e.end_date, e.total_classes, e.total_fee,
          (SELECT amount FROM payments WHERE enrollment_id = e.id AND stage = 'Advance') AS advance,
          (SELECT amount FROM payments WHERE enrollment_id = e.id AND stage = 'Final') AS final, e.status
        FROM enrollments e JOIN students s ON s.id = e.student_id JOIN candidates c ON c.id = s.candidate_id
        JOIN teachers t ON t.id = e.teacher_id JOIN users r ON r.id = e.sales_rep_id
-       WHERE substr(e.admission_date,1,7) = @month ORDER BY e.admission_date, e.id`),
+       WHERE (@month = 'all' OR substr(e.admission_date,1,7) = @month) ORDER BY e.admission_date, e.id`),
     q(`SELECT p.date, s.student_code, c.student_name, p.stage, p.amount, p.method, p.reference, r.name AS sales_rep
        FROM payments p JOIN enrollments e ON e.id = p.enrollment_id JOIN students s ON s.id = e.student_id
        JOIN candidates c ON c.id = s.candidate_id JOIN users r ON r.id = e.sales_rep_id
-       WHERE p.status = 'Paid' AND substr(p.date,1,7) = @month ORDER BY p.date, p.id`),
+       WHERE p.status = 'Paid' AND (@month = 'all' OR substr(p.date,1,7) = @month) ORDER BY p.date, p.id`),
     q(`SELECT substr(cl.scheduled_at,1,10) AS day, substr(cl.scheduled_at,12,5) AS time, cl.class_code, c.student_name, t.name AS teacher,
          cl.format, cl.duration_min, cl.status, cl.attendance, cl.topics,
          cl.rating_participation, cl.rating_homework, cl.rating_progress, fb.rating AS parent_rating
        FROM classes cl JOIN enrollments e ON e.id = cl.enrollment_id JOIN students s ON s.id = e.student_id
        JOIN candidates c ON c.id = s.candidate_id JOIN teachers t ON t.id = cl.teacher_id
        LEFT JOIN feedback fb ON fb.class_id = cl.id AND fb.kind = 'class'
-       WHERE substr(cl.scheduled_at,1,7) = @month ORDER BY cl.scheduled_at, cl.id`),
+       WHERE (@month = 'all' OR substr(cl.scheduled_at,1,7) = @month) ORDER BY cl.scheduled_at, cl.id`),
     q(`SELECT substr(f.submitted_at,1,10) AS day, f.kind, t.name AS teacher, c.student_name, e.course, cl.class_code,
          f.rating, f.teacher_rating, f.content_rating, f.progress_rating, f.nps, f.continue_choice, f.tags, f.comment
        FROM feedback f JOIN teachers t ON t.id = f.teacher_id JOIN enrollments e ON e.id = f.enrollment_id
        JOIN students s ON s.id = e.student_id JOIN candidates c ON c.id = s.candidate_id LEFT JOIN classes cl ON cl.id = f.class_id
-       WHERE substr(f.submitted_at,1,7) = @month ORDER BY f.submitted_at`),
+       WHERE (@month = 'all' OR substr(f.submitted_at,1,7) = @month) ORDER BY f.submitted_at`),
     db.get(`SELECT
-       (SELECT COUNT(*) FROM candidates WHERE substr(created_at,1,7) = @month) AS candidates_added,
-       (SELECT COUNT(*) FROM pretest_results WHERE substr(submitted_at,1,7) = @month) AS results,
-       (SELECT COUNT(*) FROM pretest_results WHERE substr(submitted_at,1,7) = @month AND admission_status = 'Confirmed') AS confirmed,
-       (SELECT COALESCE(SUM(total_fee),0) FROM enrollments WHERE substr(admission_date,1,7) = @month) AS admitted_value,
-       (SELECT COUNT(*) FROM classes WHERE counted = 1 AND substr(scheduled_at,1,7) = @month) AS classes_done,
-       (SELECT COUNT(*) FROM classes WHERE status IN ('Cancelled','Teacher Absent','Student Absent') AND substr(scheduled_at,1,7) = @month) AS classes_missed,
-       (SELECT ROUND(AVG(rating)::numeric, 1) FROM feedback WHERE kind = 'class' AND substr(submitted_at,1,7) = @month) AS class_rating,
-       (SELECT COUNT(*) FROM feedback WHERE kind = 'course' AND substr(submitted_at,1,7) = @month) AS course_answers`, p),
+       (SELECT COUNT(*) FROM candidates WHERE (@month = 'all' OR substr(created_at,1,7) = @month)) AS candidates_added,
+       (SELECT COUNT(*) FROM pretest_results WHERE (@month = 'all' OR substr(submitted_at,1,7) = @month)) AS results,
+       (SELECT COUNT(*) FROM pretest_results WHERE (@month = 'all' OR substr(submitted_at,1,7) = @month) AND admission_status = 'Confirmed') AS confirmed,
+       (SELECT COALESCE(SUM(total_fee),0) FROM enrollments WHERE (@month = 'all' OR substr(admission_date,1,7) = @month)) AS admitted_value,
+       (SELECT COUNT(*) FROM classes WHERE counted = 1 AND (@month = 'all' OR substr(scheduled_at,1,7) = @month)) AS classes_done,
+       (SELECT COUNT(*) FROM classes WHERE status IN ('Cancelled','Teacher Absent','Student Absent') AND (@month = 'all' OR substr(scheduled_at,1,7) = @month)) AS classes_missed,
+       (SELECT ROUND(AVG(rating)::numeric, 1) FROM feedback WHERE kind = 'class' AND (@month = 'all' OR substr(submitted_at,1,7) = @month)) AS class_rating,
+       (SELECT COUNT(*) FROM feedback WHERE kind = 'course' AND (@month = 'all' OR substr(submitted_at,1,7) = @month)) AS course_answers`, p),
   ]);
 
   const wb = new ExcelJS.Workbook();
@@ -89,7 +89,7 @@ async function buildWorkbook(db, data, month, user) {
     ['Admissions', null],
     ['New admissions', data.totals.admissions_in_month], ['Admitted fee value', counts.admitted_value, true],
     ['Fees', null],
-    ['Fees collected in the month', data.totals.collected_in_month, true], ['Pending fees (now)', data.totals.pending_total, true], ['Overdue fees (now)', data.totals.overdue_total, true],
+    [month === 'all' ? 'Fees collected (all time)' : 'Fees collected in the month', data.totals.collected_in_month, true], ['Pending fees (now)', data.totals.pending_total, true], ['Overdue fees (now)', data.totals.overdue_total, true],
     ['Classes', null],
     ['Classes completed', counts.classes_done], ['Cancelled / absent', counts.classes_missed],
     ['Feedback', null],
@@ -102,6 +102,27 @@ async function buildWorkbook(db, data, month, user) {
   }
   ws.addRow([]);
   ws.addRow(['Each tab has the detail behind these figures.']).font = { italic: true, color: { argb: 'FF5F6B65' } };
+
+  // All time: one row per month.
+  if (month === 'all') {
+    const byMonth = await db.all(`WITH m AS (
+        SELECT substr(created_at,1,7) k FROM candidates UNION SELECT substr(admission_date,1,7) FROM enrollments
+        UNION SELECT substr(date,1,7) FROM payments WHERE status='Paid' UNION SELECT substr(scheduled_at,1,7) FROM classes)
+      SELECT k AS month,
+        (SELECT COUNT(*) FROM candidates WHERE substr(created_at,1,7) = k) AS candidates_added,
+        (SELECT COUNT(*) FROM enrollments WHERE substr(admission_date,1,7) = k) AS admissions,
+        (SELECT COALESCE(SUM(total_fee),0) FROM enrollments WHERE substr(admission_date,1,7) = k) AS admitted_value,
+        (SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='Paid' AND substr(date,1,7) = k) AS collected,
+        (SELECT COUNT(*) FROM classes WHERE counted = 1 AND substr(scheduled_at,1,7) = k) AS classes_done,
+        (SELECT COUNT(*) FROM classes WHERE status IN ('Cancelled','Teacher Absent','Student Absent') AND substr(scheduled_at,1,7) = k) AS classes_missed
+      FROM m WHERE k IS NOT NULL ORDER BY k`);
+    sheet(wb, 'By month', [
+      { header: 'Month', key: 'month', width: 12 }, { header: 'Candidates added', key: 'candidates_added', width: 15 },
+      { header: 'Admissions', key: 'admissions', width: 11 }, { header: 'Admitted fee value', key: 'admitted_value', width: 16, money: true },
+      { header: 'Collected', key: 'collected', width: 13, money: true }, { header: 'Classes completed', key: 'classes_done', width: 15 },
+      { header: 'Cancelled / absent', key: 'classes_missed', width: 15 },
+    ], byMonth);
+  }
 
   // 2–9. Detail sheets
   sheet(wb, 'Pre-tests', [

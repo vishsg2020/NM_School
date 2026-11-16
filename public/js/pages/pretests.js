@@ -54,7 +54,17 @@ export async function renderQueue(page, { query }) {
       lastRows = rows;
       const active = Object.entries(d).filter(([, v]) => v).length;
       page.querySelector('#count').textContent = `${rows.length} candidate${rows.length === 1 ? '' : 's'}${active ? ' match the filters' : ''}`;
-      list.innerHTML = renderTable(rows, active);
+      if (isTeacher) { list.innerHTML = renderTable(rows, active); return; }
+      // Scheduled pre-tests that still need a teacher come first, in their own table.
+      const needs = rows.filter(r => r.status === 'Scheduled' && !r.pretest_teacher_id);
+      // The rest: upcoming soonest first, then those with no time yet, then past ones (latest first).
+      const now = `${todayLocal()}T00:00`;
+      const rank = r => (!r.pretest_at ? 1 : r.pretest_at >= now ? 0 : 2);
+      const rest = rows.filter(r => !needs.includes(r)).sort((a, b) => rank(a) - rank(b)
+        || (rank(a) === 0 ? a.pretest_at.localeCompare(b.pretest_at) : rank(a) === 2 ? b.pretest_at.localeCompare(a.pretest_at) : b.id - a.id));
+      list.innerHTML = `<section class="q-section urgent"><h2>Scheduled · teacher not assigned <span class="qcount ${needs.length ? 'red' : ''}">${needs.length}</span></h2>
+          ${needs.length ? renderTable(needs, active, { assign: true }) : '<p class="small ok-line">✓ Every scheduled pre-test has a teacher.</p>'}</section>
+        <section class="q-section"><h2>All other pre-tests <span class="qcount">${rest.length}</span></h2>${renderTable(rest, active)}</section>`;
     } catch (e) {
       if (my === seq) list.innerHTML = stateBox('error', 'Could not load the queue', e.message);
     } finally { list.removeAttribute('aria-busy'); }
@@ -78,7 +88,7 @@ export async function renderQueue(page, { query }) {
   if (query.new && can('manager', 'sales')) candidateForm(null, load);
 }
 
-function renderTable(rows, filtered) {
+function renderTable(rows, filtered, { assign = false } = {}) {
   const isTeacher = can('teacher');
   return table([
     { label: 'Lead ID', cell: r => `<span class="nowrap">${esc(r.lead_id)}</span>` },
@@ -90,7 +100,7 @@ function renderTable(rows, filtered) {
     ...(isTeacher ? [] : [{ label: 'Sales rep', cell: r => esc(r.sales_rep_name) }]),
     { label: 'Actions', cls: 'cell-actions', cell: r => (r.meet_link ? `<button class="btn small" type="button" data-copy-row="${r.id}" title="Copy Google Meet link">Copy link</button> ` : '') + (isTeacher
       ? `<a class="btn small ${r.result_id ? '' : 'primary'}" href="#/candidate/${r.id}">${r.result_id ? 'View result' : 'Record result'}</a>`
-      : `<button class="btn small" type="button" data-edit="${r.id}">Edit</button> <a class="btn small" href="#/candidate/${r.id}">Open</a>`) },
+      : `<button class="btn small ${assign && can('manager') ? 'primary' : ''}" type="button" data-edit="${r.id}">${assign && can('manager') ? 'Assign teacher' : 'Edit'}</button> <a class="btn small" href="#/candidate/${r.id}">Open</a>`) },
   ], rows, filtered
     ? { empty: 'No candidates match these filters', emptyHint: ' Try clearing a filter.' }
     : { empty: isTeacher ? 'No pre-tests assigned to you yet' : 'No candidates yet', emptyHint: isTeacher ? '' : ' Add the first candidate to start the queue.' });

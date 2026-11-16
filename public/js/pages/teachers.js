@@ -1,4 +1,5 @@
 import { api, get, esc, html, raw, pill, table, drawer, onSubmit, options, toast, fmtTime, WEEKDAYS, confirmBox, ApiError } from '../core.js';
+import { shrinkImage, guessType, toBase64 } from './pretests.js';
 
 const summarize = list => {
   if (!list.length) return '<span class="muted">Not set</span>';
@@ -70,6 +71,13 @@ function teacherForm(t, after) {
       <fieldset><legend>Availability slots</legend><p class="small muted">Must sit inside working hours. Leave empty to allow any time within working hours.</p>
         <div id="slots">${raw((t?.slots || []).map(s => windowRow(s, true)).join(''))}</div>
         <button class="btn small" type="button" data-add="slots">Add slot</button><div class="field"></div></fieldset>
+      <fieldset><legend>Shown to parents (student page)</legend>
+        <div class="ident">
+          <div><label class="avatar" for="t-photo" id="t-avatar">${raw(t?.has_photo ? `<img src="/api/teachers/${t.id}/photo?v=${Date.now()}" alt="Teacher photo">` : '<span>Photo<br>(optional)</span>')}</label>
+            <input id="t-photo" class="sr-only" type="file" accept="image/*"><div class="small muted center">Tap to change</div></div>
+          <div class="field"><label for="t-about">About (optional)</label><textarea id="t-about" name="about" maxlength="400" placeholder="e.g. 8 years teaching Malayalam to children abroad.">${t?.about}</textarea><div class="hint">One or two friendly sentences. Parents see this with the photo.</div></div>
+        </div>
+      </fieldset>
       <div class="field"><label for="t-notes">Notes</label><textarea id="t-notes" name="notes">${t?.notes}</textarea></div>
       ${raw(editing ? `<fieldset><legend>Status</legend><label class="check"><input type="checkbox" name="active" ${t.active ? 'checked' : ''}> Active (can be assigned work and sign in)</label><div class="field"></div></fieldset>` : '')}
       ${raw(editing && !t.login_email ? '<p class="small muted">To let this teacher sign in, create a login on the Users page.</p>' : '')}
@@ -86,6 +94,14 @@ function teacherForm(t, after) {
         d.querySelector('#hours').innerHTML = [1, 2, 3, 4, 5, 6].map(w => windowRow({ weekday: w, start_time: '09:00', end_time: '15:00' }, false)).join('');
       });
       const collect = sel => [...d.querySelectorAll(sel + ' .windows-row')].map(r => Object.fromEntries([...r.querySelectorAll('[data-k]')].map(i => [i.dataset.k, i.value])));
+      let photo = null;
+      d.querySelector('#t-photo').addEventListener('change', async ev => {
+        const f = ev.target.files[0]; if (!f) return;
+        const p = await shrinkImage(f, guessType(f));
+        if (!/^image\/(jpeg|png|webp)$/.test(p.type) || p.blob.size > 2 * 1024 * 1024) { toast('Choose a JPG or PNG photo under 2 MB', 'error'); return; }
+        photo = p;
+        d.querySelector('#t-avatar').innerHTML = `<img src="data:${p.type};base64,${await toBase64(p.blob)}" alt="Teacher photo">`;
+      });
       onSubmit(form, async v => {
         if (!v.name.trim()) throw Object.assign(new Error('Name is required'), { data: { field: 'Name *' } });
         const body = { ...v, hours: collect('#hours'), slots: collect('#slots') };
@@ -106,7 +122,11 @@ function teacherForm(t, after) {
           try { await api('PATCH', `/api/teachers/${t.id}`, body); }
           catch (e) { if (e instanceof ApiError && e.data.code === 'NEEDS_CONFIRM') { body.confirm = true; await api('PATCH', `/api/teachers/${t.id}`, body); } else throw e; }
         } else {
-          await api('POST', '/api/teachers', body);
+          t = await api('POST', '/api/teachers', body);
+        }
+        if (photo) {
+          try { await api('PUT', `/api/teachers/${t.id}/photo`, { mime: photo.type, data: await toBase64(photo.blob) }); }
+          catch (e) { toast(`Photo not saved: ${e.message}`, 'error'); }
         }
         close(); toast(editing ? 'Teacher saved' : 'Teacher added'); after();
       });
