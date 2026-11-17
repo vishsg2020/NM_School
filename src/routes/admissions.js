@@ -5,9 +5,11 @@ const { isUniqueViolation } = require('../db');
 const { COURSES } = require('./candidates');
 const {
   bad, notFound, conflict, unprocessable, str, int, oneOf, isValidDate, isValidTime, today, inr, idParam,
-  projectDates, isValidAadhaar, addMinutes, weekdayOf,
+  projectDates, isValidAadhaar, addMinutes, weekdayOf, bool,
 } = require('../util');
+const addDays = (d, n) => new Date(Date.parse(d + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10);
 const { PRETEST_MINUTES } = require('./candidates');
+const { endDateFor, refreshEndDate, missedSummary } = require('../school-rules');
 
 // Student list sort options (ST-01). Newest admission first by default.
 const STUDENT_SORTS = {
@@ -31,7 +33,7 @@ function parseSlot(b, { required }) {
   if (time && !isValidTime(time)) throw bad('Preferred time is not valid', { field: 'Time (IST)' });
   return { slot_days: days.length ? days.join(',') : null, slot_time: time };
 }
-const endDateOf = e => (e.slot_days ? projectDates(e.start_date, e.slot_days.split(',').map(Number), e.total_classes).at(-1) || null : null);
+const endDateOf = e => endDateFor(e); // make-up classes are added by refreshEndDate once classes are missed
 
 /** Student ID typed by the Manager, and Aadhaar reduced to its last four digits. */
 async function parseIdentity(db, b, studentId) {
@@ -60,7 +62,11 @@ function moneySummary(fee, payments, onDate = today()) {
   const paid = payments.filter(p => p.status === 'Paid').reduce((s, p) => s + p.amount, 0);
   const pending = payments.filter(p => p.status === 'Pending').reduce((s, p) => s + p.amount, 0);
   const overdue = payments.filter(p => p.status === 'Pending' && p.date < onDate).reduce((s, p) => s + p.amount, 0);
-  return { total_fee: fee, total_paid: paid, outstanding: fee - paid, pending_amount: pending, overdue_amount: overdue };
+  // Extra-class charges are owed on top of the course fee.
+  const extra = payments.filter(p => p.stage === 'Extra').reduce((s, p) => s + p.amount, 0);
+  const out = { total_fee: fee, total_paid: paid, outstanding: fee + extra - paid, pending_amount: pending, overdue_amount: overdue };
+  if (extra) out.extra_charges = extra;
+  return out;
 }
 
 function parsePayment(p, stage) {
@@ -108,7 +114,7 @@ function teacherSafe(e) {
 }
 
 module.exports = (app, { db }) => {
-  const paymentsOf = (id, t = db) => t.all(`SELECT * FROM payments WHERE enrollment_id = ? ORDER BY CASE stage WHEN 'Advance' THEN 0 ELSE 1 END`, [id]);
+  const paymentsOf = (id, t = db) => t.all(`SELECT * FROM payments WHERE enrollment_id = ? ORDER BY CASE stage WHEN 'Advance' THEN 0 WHEN 'Final' THEN 1 ELSE 2 END, id`, [id]);
   const enrollmentById = id => db.get(`${ENROLL_SELECT} WHERE e.id = ?`, [id]);
 
   // Students with a Confirmed assessment and no enrollment yet.
@@ -248,7 +254,7 @@ module.exports = (app, { db }) => {
       if (e.total_classes < before.completed_classes) throw bad(`Total classes cannot be less than the ${before.completed_classes} already completed`);
     }
     if (b.status !== undefined) {
-      e.status = oneOf(b.status, ['Active', 'Completed', 'Paused', 'Cancelled'], { required: true, name: 'Status' });
+      e.status = oneOf(b.status, ['Active', 'Upcoming', 'Completed', 'Paused', 'Cancelled'], { required: true, name: 'Status' });
       if (e.status === 'Active' && before.status !== 'Active' &&
           (await db.get(`SELECT 1 AS x FROM enrollments WHERE student_id = ? AND status='Active' AND id <> ?`, [before.student_id, before.id])))
         throw conflict('This student already has another active enrollment');
@@ -266,6 +272,7 @@ module.exports = (app, { db }) => {
         start_date=@start_date, notes=@notes, slot_days=@slot_days, slot_time=@slot_time, end_date=@end_date,
         updated_at=now_iso() WHERE id=@id AND completed_classes <= @total_classes`, e);
       if (!r.rowCount) throw bad('Total classes cannot be less than the classes already completed');
+      e.end_date = await refreshEndDate(tx, before.id);
       await audit(tx, req.user, 'enrollment', before.id, 'updated', before, e, str(b.reason, { max: 500 }));
     });
     res.json(await enrollmentById(before.id));
@@ -282,7 +289,7 @@ module.exports = (app, { db }) => {
     const reason = str(b.reason, { required: true, name: 'Reason for change', max: 500 });
     if (adv + fin !== fee) throw unprocessable(feeMismatchMessage(fee, adv, fin), { code: 'FEE_MISMATCH', difference: fee - adv - fin });
     await db.tx(async tx => {
-      const pays = await tx.all(`SELECT * FROM payments WHERE enrollment_id = ? ORDER BY id FOR UPDATE`, [e.id]);
+      const pays = await tx.all(`SELECT * FROM payments WHERE enrollment_id = ? AND stage IN ('Advance','Final') ORDER BY id FOR UPDATE`, [e.id]);
       for (const p of pays) {
         const amt = p.stage === 'Advance' ? adv : fin;
         if (p.status === 'Paid' && p.amount !== amt) throw bad(`${p.stage} is already marked Paid; change its status to Pending first if the received amount was wrong`);
@@ -301,12 +308,138 @@ module.exports = (app, { db }) => {
     res.json({ payments, money: moneySummary(fee, payments) });
   });
 
+  // ---------- Renewals ----------
+  /** Teacher must be active and set up for the class mode. */
+  async function checkTeacher(teacherId, mode) {
+    const t = await db.get('SELECT * FROM teachers WHERE id = ?', [teacherId]);
+    if (!t) throw bad('Teaching teacher not found');
+    if (!t.active) throw bad('Teaching teacher is inactive');
+    if (mode === '1:1' && !t.supports_1to1) throw bad(`${t.name} is not configured for 1:1 classes`);
+    if (mode === '3:1' && !t.supports_3to1) throw bad(`${t.name} is not configured for 3:1 classes`);
+  }
+
+  // The next course for a student. Saved as 'Upcoming' while the current course still has classes left;
+  // it becomes Active automatically when the current course's last class is completed.
+  app.post('/api/enrollments/:id/renew', requireRole('manager'), async (req, res) => {
+    const b = req.body;
+    const key = str(b.idempotency_key, { max: 80, name: 'Request key' });
+    const replay = async () => {
+      const prior = key && (await db.get('SELECT id FROM enrollments WHERE idempotency_key = ?', [key]));
+      return prior ? { ...(await enrollmentById(prior.id)), payments: await paymentsOf(prior.id), replayed: true } : null;
+    };
+    const earlier = await replay();
+    if (earlier) return res.status(200).json(earlier);
+    const prev = await db.get('SELECT * FROM enrollments WHERE id = ?', [idParam(req.params.id)]);
+    if (!prev) throw notFound('Enrollment');
+    if (!['Active', 'Completed'].includes(prev.status)) throw bad(`This course is ${prev.status}; only an Active or Completed course can be renewed`);
+    if (await db.get('SELECT 1 AS x FROM enrollments WHERE renewal_of = ?', [prev.id])) throw conflict('This course has already been renewed', { code: 'ALREADY_RENEWED' });
+
+    const e = {
+      student_id: prev.student_id,
+      course: oneOf(b.course, COURSES, { required: true, name: 'Course' }),
+      class_mode: oneOf(b.class_mode, MODES, { required: true, name: 'Class mode' }),
+      total_classes: int(b.total_classes, { min: 1, max: 1000, required: true, name: 'Total classes' }),
+      teacher_id: int(b.teacher_id, { min: 1, required: true, name: 'Teaching teacher' }),
+      start_date: str(b.start_date, { required: true, name: 'Start date', max: 10 }),
+      total_fee: int(b.total_fee, { min: 0, max: 10_000_000, required: true, name: 'Total course fee' }),
+      notes: str(b.notes, { name: 'Notes', max: 2000 }),
+      ...parseSlot(b, { required: true }),
+    };
+    if (!isValidDate(e.start_date)) throw bad('Start date is not valid', { field: 'Start date' });
+    e.end_date = endDateOf(e);
+    await checkTeacher(e.teacher_id, e.class_mode);
+    const adv = parsePayment(b.advance, 'Advance');
+    const fin = parsePayment(b.final, 'Final');
+    if (adv.amount + fin.amount !== e.total_fee) {
+      throw unprocessable(feeMismatchMessage(e.total_fee, adv.amount, fin.amount), { code: 'FEE_MISMATCH', difference: e.total_fee - (adv.amount + fin.amount) });
+    }
+    const finished = prev.status === 'Completed' || prev.completed_classes >= prev.total_classes;
+    let id;
+    try {
+      id = await db.tx(async tx => {
+        if (finished && prev.status === 'Active') {
+          await tx.run(`UPDATE enrollments SET status = 'Completed', updated_at = now_iso() WHERE id = ?`, [prev.id]);
+          await audit(tx, req.user, 'enrollment', prev.id, 'completed', { status: 'Active' }, { status: 'Completed' }, 'Renewed after the last class');
+        }
+        const r = await tx.get(`INSERT INTO enrollments (student_id, course, class_mode, total_classes, teacher_id, start_date,
+          admission_date, total_fee, lead_id, sales_rep_id, notes, slot_days, slot_time, end_date, idempotency_key, created_by, status, renewal_of)
+          VALUES (@student_id, @course, @class_mode, @total_classes, @teacher_id, @start_date, @admission_date, @total_fee,
+          @lead_id, @sales_rep_id, @notes, @slot_days, @slot_time, @end_date, @key, @by, @status, @renewal_of) RETURNING id`, {
+          ...e, admission_date: today(), lead_id: prev.lead_id, sales_rep_id: prev.sales_rep_id, key, by: req.user.id,
+          status: finished ? 'Active' : 'Upcoming', renewal_of: prev.id,
+        });
+        for (const p of [adv, fin]) {
+          await tx.run(`INSERT INTO payments (enrollment_id, stage, amount, status, date, method, reference)
+            VALUES (@eid, @stage, @amount, @status, @date, @method, @reference)`, { ...p, eid: r.id });
+        }
+        await audit(tx, req.user, 'enrollment', r.id, 'renewed', null, { ...e, renewal_of: prev.id, advance: adv, final: fin });
+        await audit(tx, req.user, 'enrollment', prev.id, 'renewal_added', null, { renewal_id: r.id, course: e.course });
+        return r.id;
+      });
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        const again = await replay();
+        if (again) return res.status(200).json(again);
+        throw conflict('This course has already been renewed, or the student already has another active course', { code: 'ALREADY_RENEWED' });
+      }
+      throw err;
+    }
+    res.status(201).json({ ...(await enrollmentById(id)), payments: await paymentsOf(id) });
+  });
+
+  // Start an Upcoming renewal now (e.g. the family wants to move on early). The current course is marked Completed.
+  app.post('/api/enrollments/:id/start', requireRole('manager'), async (req, res) => {
+    const e = await db.get('SELECT * FROM enrollments WHERE id = ?', [idParam(req.params.id)]);
+    if (!e) throw notFound('Enrollment');
+    if (e.status !== 'Upcoming') throw bad('Only an Upcoming course can be started');
+    const reason = str(req.body?.reason, { name: 'Reason', max: 500 });
+    await db.tx(async tx => {
+      const prev = e.renewal_of ? await tx.get('SELECT * FROM enrollments WHERE id = ? FOR UPDATE', [e.renewal_of]) : null;
+      if (prev && prev.status === 'Active') {
+        await tx.run(`UPDATE enrollments SET status = 'Completed', updated_at = now_iso() WHERE id = ?`, [prev.id]);
+        await audit(tx, req.user, 'enrollment', prev.id, 'completed', { status: 'Active' }, { status: 'Completed' }, reason || 'Next course started early');
+      }
+      await tx.run(`UPDATE enrollments SET status = 'Active', updated_at = now_iso() WHERE id = ?`, [e.id]);
+      await audit(tx, req.user, 'enrollment', e.id, 'started', { status: 'Upcoming' }, { status: 'Active' }, reason);
+    });
+    res.json(await enrollmentById(e.id));
+  });
+
+  // ---------- Missed classes: extra-class charges ----------
+  app.post('/api/enrollments/:id/extra-charges', requireRole('manager'), async (req, res) => {
+    const e = await db.get('SELECT * FROM enrollments WHERE id = ?', [idParam(req.params.id)]);
+    if (!e) throw notFound('Enrollment');
+    const amount = int(req.body.amount, { min: 1, max: 1_000_000, required: true, name: 'Amount per class' });
+    const due = str(req.body.due_date, { required: true, name: 'Due date', max: 10 });
+    if (!isValidDate(due)) throw bad('Due date is not valid', { field: 'Due date' });
+    const created = await db.tx(async tx => {
+      await tx.get('SELECT id FROM enrollments WHERE id = ? FOR UPDATE', [e.id]); // one charge run at a time
+      const classes = await tx.all('SELECT id, class_code, scheduled_at, status, absence_notice FROM classes WHERE enrollment_id = ?', [e.id]);
+      const extras = await tx.all(`SELECT * FROM payments WHERE enrollment_id = ? AND stage = 'Extra'`, [e.id]);
+      const m = missedSummary(e, classes, extras);
+      let ids = m.unbilled;
+      if (Array.isArray(req.body.class_ids)) ids = ids.filter(x => req.body.class_ids.map(Number).includes(x));
+      if (!ids.length) throw bad('There are no chargeable missed classes left to bill');
+      const out = [];
+      for (const cid of ids) {
+        const r = await tx.get(`INSERT INTO payments (enrollment_id, stage, amount, status, date, class_id) VALUES (?, 'Extra', ?, 'Pending', ?, ?) RETURNING id`, [e.id, amount, due, cid]);
+        out.push(r.id);
+      }
+      await audit(tx, req.user, 'enrollment', e.id, 'extra_charges_added', null,
+        { classes: ids.map(x => classes.find(c => c.id === x).class_code), amount_per_class: amount, due_date: due }, str(req.body.reason, { max: 500 }));
+      return out;
+    });
+    res.status(201).json({ created: created.length, payments: await paymentsOf(e.id) });
+  });
+
   // ---------- Payments ----------
   app.get('/api/payments', requireRole('manager'), async (req, res) => {
     const q = req.query; const where = []; const p = { today: today() };
     if (q.status === 'Paid' || q.status === 'Pending') { where.push('p.status = @status'); p.status = q.status; }
     if (q.status === 'Overdue') where.push(`p.status = 'Pending' AND p.date < @today`);
-    if (q.stage === 'Advance' || q.stage === 'Final') { where.push('p.stage = @stage'); p.stage = q.stage; }
+    // To chase: overdue, or due within the next 7 days.
+    if (q.status === 'chase') { where.push(`p.status = 'Pending' AND p.date <= @soon`); p.soon = addDays(p.today, 7); }
+    if (['Advance', 'Final', 'Extra'].includes(q.stage)) { where.push('p.stage = @stage'); p.stage = q.stage; }
     if (q.student) { where.push('e.student_id = @sid'); p.sid = idParam(q.student); }
     if (q.enrollment) { where.push('e.id = @eid'); p.eid = idParam(q.enrollment); }
     if (q.date_from && isValidDate(q.date_from)) { where.push('p.date >= @df'); p.df = q.date_from; }
@@ -317,7 +450,11 @@ module.exports = (app, { db }) => {
     if (q.q) { where.push('(c.student_name ILIKE @q OR c.lead_id ILIKE @q OR p.reference ILIKE @q)'); p.q = `%${q.q}%`; }
     const rows = await db.all(`
       SELECT p.*, e.student_id, e.course, e.total_fee, e.lead_id, c.student_name, c.parent_name, c.phone,
-             r.name AS sales_rep_name, (p.status = 'Pending' AND p.date < @today) AS overdue
+             r.name AS sales_rep_name, (p.status = 'Pending' AND p.date < @today) AS overdue,
+             (SELECT COUNT(*) FROM payment_followups f WHERE f.payment_id = p.id AND f.kind = 'reminder') AS reminders,
+             (SELECT MAX(f.created_at) FROM payment_followups f WHERE f.payment_id = p.id AND f.kind = 'reminder') AS last_reminder_at,
+             (SELECT f.note FROM payment_followups f WHERE f.payment_id = p.id AND f.kind = 'note' ORDER BY f.id DESC LIMIT 1) AS last_note,
+             (SELECT f.next_date FROM payment_followups f WHERE f.payment_id = p.id AND f.next_date IS NOT NULL ORDER BY f.id DESC LIMIT 1) AS next_date
       FROM payments p JOIN enrollments e ON e.id = p.enrollment_id
       JOIN students s ON s.id = e.student_id JOIN candidates c ON c.id = s.candidate_id
       JOIN users r ON r.id = e.sales_rep_id
@@ -348,7 +485,11 @@ module.exports = (app, { db }) => {
     const before = await db.get('SELECT * FROM payments WHERE id = ?', [idParam(req.params.id)]);
     if (!before) throw notFound('Payment');
     const b = req.body; const p = { ...before };
-    if (b.amount !== undefined && Number(b.amount) !== before.amount) throw bad('Change amounts with “Edit fee plan” so Advance + Final stays equal to the course fee');
+    if (b.amount !== undefined && Number(b.amount) !== before.amount) {
+      if (before.stage !== 'Extra') throw bad('Change amounts with “Edit fee plan” so Advance + Final stays equal to the course fee');
+      if (before.status === 'Paid') throw bad('This charge is already Paid; change it to Pending first');
+      p.amount = int(b.amount, { min: 1, max: 1_000_000, required: true, name: 'Amount' });
+    }
     if (b.status !== undefined) p.status = oneOf(b.status, ['Paid', 'Pending'], { required: true, name: 'Status' });
     if (b.date !== undefined) p.date = str(b.date, { name: 'Date', max: 10 });
     if (b.method !== undefined) p.method = oneOf(b.method || null, METHODS, { name: 'Method' });
@@ -357,10 +498,25 @@ module.exports = (app, { db }) => {
     const reason = str(b.reason, { name: 'Reason', max: 500 });
     if (before.status === 'Paid' && p.status === 'Pending' && !reason) throw bad('Give a reason when reverting a Paid payment to Pending', { field: 'Reason' });
     await db.tx(async tx => {
-      await tx.run(`UPDATE payments SET status=@status, date=@date, method=@method, reference=@reference, updated_at=now_iso() WHERE id=@id`, p);
+      await tx.run(`UPDATE payments SET amount=@amount, status=@status, date=@date, method=@method, reference=@reference, updated_at=now_iso() WHERE id=@id`, p);
       await audit(tx, req.user, 'payment', p.id, before.status !== p.status ? `status_${p.status.toLowerCase()}` : 'updated', before, p, reason);
     });
     res.json(await db.get('SELECT * FROM payments WHERE id = ?', [p.id]));
+  });
+
+  // An extra-class charge entered by mistake can be removed while it is still Pending.
+  app.delete('/api/payments/:id', requireRole('manager'), async (req, res) => {
+    const before = await db.get('SELECT * FROM payments WHERE id = ?', [idParam(req.params.id)]);
+    if (!before) throw notFound('Payment');
+    if (before.stage !== 'Extra') throw bad('Only extra-class charges can be removed');
+    if (before.status !== 'Pending') throw bad('This charge is already Paid; change it to Pending first');
+    const reason = str(req.body?.reason, { required: true, name: 'Reason', max: 500 });
+    await db.tx(async tx => {
+      await tx.run('DELETE FROM payment_followups WHERE payment_id = ?', [before.id]);
+      await tx.run('DELETE FROM payments WHERE id = ?', [before.id]);
+      await audit(tx, req.user, 'enrollment', before.enrollment_id, 'extra_charge_removed', before, null, reason);
+    });
+    res.json({ ok: true });
   });
 
   app.get('/api/payments/:id/history', requireRole('manager'), async (req, res) => {
@@ -374,11 +530,17 @@ module.exports = (app, { db }) => {
     if (q.q) { where.push('(c.student_name ILIKE @q OR c.parent_name ILIKE @q OR c.lead_id ILIKE @q OR s.student_code ILIKE @q)'); p.q = `%${q.q}%`; }
     if (q.status === 'awaiting') where.push('NOT EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id)');
     if (q.status === 'enrolled') where.push('EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id)');
-    if (q.admitted && /^\d{4}-\d{2}$/.test(q.admitted)) { where.push('EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND substr(x.admission_date,1,7) = @adm)'); p.adm = q.admitted; }
+    if (q.admitted && /^\d{4}-\d{2}$/.test(q.admitted)) { where.push('EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND x.renewal_of IS NULL AND substr(x.admission_date,1,7) = @adm)'); p.adm = q.admitted; }
+    // Finishing soon: an Active course with 3 or fewer classes left and no renewal saved yet.
+    if (q.status === 'finishing') where.push(`EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND x.status = 'Active' AND x.total_classes - x.completed_classes <= 3
+      AND NOT EXISTS (SELECT 1 FROM enrollments y WHERE y.renewal_of = x.id))`);
+    if (q.status === 'renewed') where.push('EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND x.renewal_of IS NOT NULL)');
+    if (q.renewed && /^\d{4}-\d{2}$/.test(q.renewed)) { where.push('EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND x.renewal_of IS NOT NULL AND substr(x.admission_date,1,7) = @ren)'); p.ren = q.renewed; }
     if (q.status === 'active') where.push(`EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND x.status='Active')`);
     // Links from the dashboard charts: students with an admission in these dates / for this teacher, rep or format.
     const ex = [];
     if (q.admitted_from && isValidDate(q.admitted_from)) { ex.push('x.admission_date >= @af'); p.af = q.admitted_from; }
+    if (q.admitted_from || q.admitted_to) ex.push('x.renewal_of IS NULL'); // renewals are counted separately from admissions
     if (q.admitted_to && isValidDate(q.admitted_to)) { ex.push('x.admission_date <= @at'); p.at = q.admitted_to; }
     if (q.teacher && req.user.role === 'manager') { ex.push('x.teacher_id = @xt'); p.xt = idParam(q.teacher); }
     if (q.sales_rep && req.user.role === 'manager') { ex.push('x.sales_rep_id = @xr'); p.xr = idParam(q.sales_rep); }
@@ -389,7 +551,8 @@ module.exports = (app, { db }) => {
              ${req.user.role === 'manager' ? 'c.phone,' : ''} r.name AS sales_rep_name,
              e.id AS enrollment_id, e.course, e.class_mode, e.status AS enrollment_status, t.name AS teacher_name,
              e.total_classes, e.completed_classes, (e.total_classes - e.completed_classes) AS remaining_classes,
-             e.admission_date, e.end_date
+             e.admission_date, e.end_date, e.next_level, e.id AS enrollment_id_current,
+             (SELECT y.id FROM enrollments y WHERE y.renewal_of = e.id) AS renewal_id
       FROM students s JOIN candidates c ON c.id = s.candidate_id JOIN users r ON r.id = c.sales_rep_id
       LEFT JOIN enrollments e ON e.id = (SELECT x.id FROM enrollments x WHERE x.student_id = s.id ORDER BY (x.status='Active') DESC, x.id DESC LIMIT 1)
       LEFT JOIN teachers t ON t.id = e.teacher_id
@@ -409,6 +572,12 @@ module.exports = (app, { db }) => {
       delete s.phone; delete s.phone_norm; delete s.student_phone; delete s.aadhaar_last4;
     } else {
       for (const e of enrollments) { e.payments = await paymentsOf(e.id); e.money = moneySummary(e.total_fee, e.payments); }
+    }
+    const allClasses = enrollments.length ? await db.all(`SELECT id, class_code, enrollment_id, scheduled_at, status, absence_notice FROM classes WHERE enrollment_id = ANY(?::int[])`, [enrollments.map(e => e.id)]) : [];
+    for (const e of enrollments) {
+      const m = missedSummary(e.total_fee !== undefined ? e : { ...e, total_fee: 0 }, allClasses.filter(c => c.enrollment_id === e.id), (e.payments || []).filter(p => p.stage === 'Extra'));
+      if (req.user.role === 'teacher') { delete m.rate; m.rows.forEach(r => { delete r.charge; }); }
+      e.missed = m;
     }
     delete s.idempotency_key;
     const result = await db.get(`SELECT pr.*, t.name AS teacher_name FROM pretest_results pr JOIN teachers t ON t.id = pr.teacher_id WHERE candidate_id = ?`, [s.candidate_id]);

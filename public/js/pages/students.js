@@ -1,5 +1,5 @@
-import { api, get, esc, html, raw, pill, inr, fmtDate, fmtDT, fmtTime, table, can, setQuery, options, stateBox, todayLocal, drawer, onSubmit, toast, starsText, feedbackUrl, copyText, fmtStamp, linkedFilters, wireLinked, clearLinked } from '../core.js';
-import { paymentForm, feePlanForm, enrollmentForm } from './admissions.js';
+import { api, get, esc, html, raw, pill, inr, fmtDate, fmtDT, fmtTime, table, can, setQuery, options, stateBox, todayLocal, drawer, onSubmit, toast, starsText, feedbackUrl, copyText, fmtStamp, linkedFilters, wireLinked, clearLinked, confirmBox, addDays } from '../core.js';
+import { paymentForm, feePlanForm, enrollmentForm, openAdmission } from './admissions.js';
 import { scheduleForm } from './classes.js';
 import { historyList, shrinkImage, guessType, toBase64 } from './pretests.js';
 
@@ -14,13 +14,14 @@ export async function renderList(page, { query }) {
     <div class="sub">${can('teacher') ? 'Students you teach.' : 'Every child with a Confirmed pre-test.'}</div></div></div>
     <form class="filters" id="sf" role="search" aria-label="Filter students">
       <div class="field grow"><label for="s-q">Search</label><input id="s-q" name="q" type="search" value="${f.q}" placeholder="Student, parent, Lead ID, Student ID"></div>
-      ${raw(can('manager') ? `<div class="field"><label for="s-st">Enrollment</label><select id="s-st" name="status">${options([['active', 'Active enrollment'], ['enrolled', 'Admitted (any enrollment)'], ['awaiting', 'Awaiting admission setup']], f.status, 'All')}</select></div>` : '')}
+      ${raw(can('manager') ? `<div class="field"><label for="s-st">Enrollment</label><select id="s-st" name="status">${options([['active', 'Active enrollment'], ['finishing', 'Finishing soon (3 or fewer classes left)'], ['renewed', 'Renewed'], ['enrolled', 'Admitted (any enrollment)'], ['awaiting', 'Awaiting admission setup']], f.status, 'All')}</select></div>` : '')}
       <div class="field"><label for="s-sort">Sort by</label><select id="s-sort" name="sort">${raw(options([['newest', 'Newest admission first'], ['oldest', 'Oldest first'], ['name', 'Name A–Z'], ['remaining', 'Fewest classes remaining'], ['end_date', 'End date (soonest)'], ['teacher', 'Teacher']], f.sort))}</select></div>
       <input type="hidden" name="admitted" value="${f.admitted}">${raw(linked.hidden)}
       <button class="btn" type="button" id="s-clear">Clear filters</button>
     </form>
     ${raw(linked.note)}
     ${raw(f.admitted ? `<p class="notice info">Showing students admitted in ${esc(f.admitted)}.</p>` : '')}
+    ${raw(f.status === 'finishing' ? '<p class="notice info">Active courses with 3 or fewer classes left and no renewal yet. Use <b>Renew</b> to set up the next course before this one ends.</p>' : '')}
     <p class="result-count" id="s-count" aria-live="polite"></p>
     <div id="s-list">${raw(stateBox('loading'))}</div>`;
   const form = page.querySelector('#sf'); const list = page.querySelector('#s-list');
@@ -40,13 +41,20 @@ export async function renderList(page, { query }) {
         { label: 'Progress', cls: 'progress-cell', cell: r => (r.course ? `<progress max="${r.total_classes}" value="${r.completed_classes}" aria-label="Classes completed"></progress><span class="sub">${r.completed_classes} of ${r.total_classes} done · ${r.remaining_classes} left</span>` : '—') },
         { label: 'Admitted', cell: r => (r.admission_date ? `<span class="nowrap">${esc(fmtDate(r.admission_date))}</span>` : '—') },
         { label: 'End date', cell: r => (r.end_date ? `<span class="nowrap">${esc(fmtDate(r.end_date))}</span>` : '—') },
-        { label: 'Status', cell: r => (r.enrollment_status ? pill(r.enrollment_status).__raw : '—') },
+        { label: 'Status', cell: r => (r.enrollment_status ? pill(r.enrollment_status).__raw : '—') + (r.renewal_id ? '<span class="sub">Renewal saved</span>' : '') },
+        ...(d.status === 'finishing' && can('manager') ? [{ label: 'Next', cell: r => `${r.next_level ? `Teacher says: <b>${esc(r.next_level)}</b>` : '<span class="muted">No end-of-course report yet</span>'}` },
+          { label: '', cls: 'cell-actions', cell: r => `<button class="btn small primary" type="button" data-renew="${r.enrollment_id}" data-sid="${r.id}">Renew</button>` }] : []),
       ], rows, { empty: 'No students found', emptyHint: can('teacher') ? ' Students appear when the Manager assigns them to you.' : '' });
     } catch (e) { if (my === seq) list.innerHTML = stateBox('error', 'Could not load students', e.message); }
   }
   let t;
   form.addEventListener('input', e => { clearTimeout(t); t = setTimeout(load, e.target.type === 'search' ? 250 : 0); });
   form.addEventListener('submit', e => { e.preventDefault(); load(); });
+  list.addEventListener('click', async ev => {
+    const b = ev.target.closest('[data-renew]'); if (!b) return;
+    const [e, st] = await Promise.all([get('/api/enrollments/' + b.dataset.renew), get('/api/students/' + b.dataset.sid)]);
+    openAdmission(st, load, { renew: e });
+  });
   wireLinked(page, load);
   page.querySelector('#s-clear').addEventListener('click', () => { clearLinked(page); form.querySelectorAll('input,select:not(#s-sort)').forEach(x => { x.value = ''; }); page.querySelector('.notice.info')?.remove(); load(); });
   await load();
@@ -87,7 +95,9 @@ export async function renderProfile(page, { id }) {
   }
   wrap.innerHTML = s.enrollments.map(e => html`<section class="panel" data-enr="${e.id}">
       <div class="row"><h2>${e.course} · ${e.class_mode}</h2>${raw(pill(e.status).__raw)}<span class="spacer"></span>
-        ${raw(e.status === 'Active' ? '<button class="btn small primary" type="button" data-act="schedule">Schedule classes</button>' : '')}
+        ${raw(['Active', 'Upcoming'].includes(e.status) ? '<button class="btn small primary" type="button" data-act="schedule">Schedule classes</button>' : '')}
+        ${raw(isMgr && e.status === 'Upcoming' ? '<button class="btn small" type="button" data-act="start">Start this course now</button>' : '')}
+        ${raw(isMgr && ['Active', 'Completed'].includes(e.status) && !s.enrollments.some(x => x.renewal_of === e.id) ? `<button class="btn small ${e.remaining_classes <= 3 ? 'primary' : ''}" type="button" data-act="renew">Renew</button>` : '')}
         ${raw(isMgr ? '<button class="btn small" type="button" data-act="reset">Reset schedule</button>' : '')}
         <button class="btn small" type="button" data-act="share">Copy student page link</button>
         ${raw(isMgr ? '<button class="btn small" type="button" data-act="edit">Edit</button>' : '')}</div>
@@ -95,16 +105,17 @@ export async function renderProfile(page, { id }) {
         <dt>Teacher</dt><dd>${e.teacher_name}</dd>
         <dt>Preferred slot</dt><dd>${slotText(e)}</dd>
         <dt>Start date</dt><dd>${fmtDate(e.start_date)}</dd>
-        <dt>End date</dt><dd>${e.end_date ? fmtDate(e.end_date) : '—'}${raw(e.end_date ? ' <span class="small muted">(planned)</span>' : '')}</dd>
+        <dt>End date</dt><dd>${e.end_date ? fmtDate(e.end_date) : '—'}${raw(e.end_date ? ` <span class="small muted">(planned${e.missed && (e.missed.student_absent + e.missed.teacher_absent) ? `, includes ${e.missed.student_absent + e.missed.teacher_absent} make-up class${e.missed.student_absent + e.missed.teacher_absent === 1 ? '' : 'es'}` : ''})</span>` : '')}</dd>
+        ${raw(e.status === 'Upcoming' ? `<dt>Starts</dt><dd>When ${esc((s.enrollments.find(x => x.id === e.renewal_of) || {}).course || 'the current course')} finishes (its last class is completed)</dd>` : '')}
         <dt>Admitted</dt><dd>${fmtDate(e.admission_date)}</dd>
         <dt>Classes</dt><dd><progress max="${e.total_classes}" value="${e.completed_classes}" aria-label="Classes completed"></progress>
           <div class="small">${e.completed_classes} completed · <strong>${e.remaining_classes} remaining</strong> of ${e.total_classes}</div></dd>
       </dl>
       ${raw(e.money ? html`<h3>Fees</h3>
-        <p>Total ${inr(e.money.total_fee)} · Paid ${inr(e.money.total_paid)} · Outstanding <strong>${inr(e.money.outstanding)}</strong>
+        <p>Total ${inr(e.money.total_fee)}${raw(e.money.extra_charges ? ` + extra classes ${esc(inr(e.money.extra_charges))}` : '')} · Paid ${inr(e.money.total_paid)} · Outstanding <strong>${inr(e.money.outstanding)}</strong>
         ${raw(e.money.overdue_amount ? ` · ${pill('Overdue ' + inr(e.money.overdue_amount), 'red').__raw}` : '')}</p>
         ${raw(table([
-          { label: 'Stage', cell: p => esc(p.stage) },
+          { label: 'Stage', cell: p => (p.stage === 'Extra' ? `Extra class<span class="sub">${esc((e.missed?.rows.find(r => r.class_id === p.class_id) || {}).class_code || '')}</span>` : esc(p.stage)) },
           { label: 'Amount', cls: 'num', cell: p => esc(inr(p.amount)) },
           { label: 'Status', cell: p => (p.status === 'Pending' && p.date < today ? pill('Overdue') : pill(p.status)).__raw },
           { label: 'Date', cell: p => `${esc(fmtDate(p.date))}<span class="sub">${p.status === 'Paid' ? 'received' : 'due'}</span>` },
@@ -112,6 +123,7 @@ export async function renderProfile(page, { id }) {
           { label: '', cls: 'cell-actions', cell: p => `<button class="btn small" type="button" data-pay="${p.id}">Update</button>` },
         ], e.payments))}
         <p></p><div class="row"><button class="btn small" type="button" data-act="fee">Edit fee plan</button><button class="btn small" type="button" data-act="hist">Enrollment history</button></div>` : '')}
+      ${raw(missedBlock(e, isMgr))}
       ${raw(endOfCourse(e))}
     </section>`).join('') + html`<section class="panel"><h2>Recent classes</h2>${raw(table([
       { label: 'Class', cell: c => `<a href="#/classes?student=${s.id}&open=${c.id}">${esc(c.class_code)}</a>` },
@@ -143,6 +155,11 @@ export async function renderProfile(page, { id }) {
     if (act === 'fee') feePlanForm(e, reload);
     if (act === 'schedule') scheduleForm({ ...e, student_name: s.student_name }, reload);
     if (act === 'reset') resetSchedule(e, s, reload);
+    if (act === 'renew') openAdmission(s, reload, { renew: e });
+    if (act === 'start') confirmBox({ title: 'Start this course now?', message: 'The current course will be marked Completed and this one becomes Active.', confirmLabel: 'Start now' })
+      .then(ok => ok && api('POST', `/api/enrollments/${e.id}/start`, {}).then(() => { toast('Course started'); reload(); }).catch(err => toast(err.message, 'error')));
+    if (act === 'charge') extraChargeForm(e, s, reload);
+    if (act === 'makeup') scheduleForm({ ...e, student_name: s.student_name }, reload);
     if (act === 'share') {
       api('POST', `/api/enrollments/${e.id}/share-link`, {}).then(r => copyText(
         `Hi! Here is ${s.student_name.split(' ')[0]}'s Malayalam class page with the teacher, the class calendar, the end date and our terms: ${location.origin}/s/${r.token}`,
@@ -274,5 +291,50 @@ function resetSchedule(e, s, after) {
         if (e.status === 'Active') scheduleForm({ ...e, student_name: s.student_name }, after);
       });
     },
+  });
+}
+
+// ---------- Missed classes: make-ups and extra charges ----------
+const MISSED_TEXT = { notice: 'Told us in advance', unrecorded: 'Before notice was recorded', free: 'No notice · free', chargeable: 'No notice · chargeable' };
+function missedBlock(e, isMgr) {
+  const m = e.missed;
+  if (!m || !(m.student_absent || m.teacher_absent)) return '';
+  const kpi = (l, v, s2, cls = '') => `<div class="kpi ${cls}"><span class="l">${esc(l)}</span><span class="v">${esc(v)}</span><span class="s">${esc(s2)}</span></div>`;
+  const unbilled = m.unbilled.length;
+  return `<h3>Missed classes</h3>
+    <div class="kpis">
+      ${kpi('Missed by student', m.student_absent, `${m.with_notice + m.not_recorded} with notice · ${m.without_notice} without`)}
+      ${kpi('Free without notice', `${m.free_used} of ${m.free_allowed} used`, m.free_used >= m.free_allowed ? 'the next one is chargeable' : 'per course')}
+      ${kpi('Chargeable', m.chargeable, isMgr && m.chargeable ? (unbilled ? `${inr(unbilled * m.rate)} not billed yet` : 'all billed') : '', m.chargeable ? 'bad' : '')}
+      ${kpi('Teacher absent', m.teacher_absent, 'never charged to the student')}
+    </div>
+    ${table([
+      { label: 'Class', cell: r => esc(r.class_code) },
+      { label: 'Date', cell: r => esc(fmtDate(r.scheduled_at)) },
+      { label: 'Missed', cell: r => (r.kind === 'chargeable' ? `<span class="pill red">${esc(MISSED_TEXT[r.kind])}</span>` : esc(MISSED_TEXT[r.kind] + (r.kind === 'free' ? ` ${r.free_number} of ${m.free_allowed}` : ''))) },
+      ...(isMgr ? [{ label: 'Charge', cell: r => (r.charge ? `${esc(inr(r.charge.amount))} · ${esc(r.charge.status)}` : r.kind === 'chargeable' ? '<span class="muted">Not billed</span>' : '—') }] : []),
+    ], m.rows, { empty: 'No classes missed by the student' })}
+    <p class="small muted">Each missed class (student or teacher) adds a make-up class at the end, so the end date moves. After ${m.free_allowed} misses without notice, each further one is charged at the per-class rate.</p>
+    <div class="row">${isMgr && unbilled ? `<button class="btn small primary" type="button" data-act="charge">Add ${esc(inr(unbilled * m.rate))} extra-class charge</button>` : ''}
+      ${['Active', 'Upcoming'].includes(e.status) ? '<button class="btn small" type="button" data-act="makeup">Schedule make-up classes</button>' : ''}</div>`;
+}
+
+function extraChargeForm(e, s, after) {
+  const m = e.missed; const n = m.unbilled.length;
+  drawer({
+    title: `Extra-class charge: ${s.student_name}`,
+    body: html`<form id="xc-form" novalidate>
+      <p class="muted">${n} missed class${n === 1 ? '' : 'es'} without notice beyond the ${m.free_allowed} free ones. Each becomes an <b>Extra</b> payment (Pending) on the Payments page.</p>
+      <div class="grid2">
+        <div class="field"><label for="xc-amt">Amount per class (₹) *</label><input id="xc-amt" name="amount" type="number" min="1" value="${m.rate}"><div class="hint">Per-class rate: total fee ÷ classes.</div></div>
+        <div class="field"><label for="xc-due">Due date *</label><input id="xc-due" name="due_date" type="date" value="${addDays(todayLocal(), 7)}"></div>
+      </div>
+      <div class="field"><label for="xc-r">Note for the history</label><input id="xc-r" name="reason" maxlength="500"></div>
+    </form>`,
+    foot: '<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" form="xc-form">Add charge</button>',
+    onMount: (d, close) => onSubmit(d.querySelector('#xc-form'), async v => {
+      await api('POST', `/api/enrollments/${e.id}/extra-charges`, { ...v, amount: Number(v.amount) });
+      close(); toast('Extra-class charge added'); after && after();
+    }),
   });
 }

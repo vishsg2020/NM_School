@@ -36,12 +36,15 @@ export async function render(page) {
           metric('Active enrollments', m.active_enrollments, '#/students?status=active'),
           metric('New admissions this month', m.new_admissions_month, `#/students?admitted=${d.month}`),
           metric('Confirmed, awaiting setup', m.awaiting_setup, '#/admissions', m.awaiting_setup ? 'attention' : ''),
+          metric('Finishing soon, not renewed', m.finishing_soon, '#/students?status=finishing', m.finishing_soon ? 'attention' : ''),
+          metric('Renewals this month', m.renewals_month, `#/students?status=renewed&renewed=${d.month}`),
         ])}
         ${group('Fees', [
           metric('Collected this month', inr(m.fees_collected_month), `#/payments?status=Paid&date_from=${d.month}-01`),
           metric('Pending fees', inr(m.pending_fees), '#/payments?status=Pending'),
           metric('Students with pending payments', m.students_pending_payments, '#/payments?status=Pending'),
           metric('Overdue students', m.overdue_students, '#/payments?status=Overdue', m.overdue_students ? 'alert' : ''),
+          metric(`Fees to chase (${m.fees_to_chase})`, inr(m.fees_to_chase_amount), '#/payments?status=chase', m.fees_to_chase ? 'attention' : ''),
         ])}
         ${group('Classes', [
           metric('Classes today', m.classes_today, `#/classes?date=${today}`),

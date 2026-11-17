@@ -269,6 +269,7 @@ export function linkedFilters(query, keys) {
     } else if (k === 'teacher') parts.push('Teacher: ' + name(state.teachers, query[k]));
     else if (k === 'sales_rep') parts.push('Sales rep: ' + name(state.reps, query[k]));
     else if (k === 'format') parts.push('Format: ' + query[k]);
+    else if (k === 'renewed') parts.push('Renewed in ' + fmtMonth(query[k]));
     else if (k === 'result') parts.push(query[k] === 'none' ? 'No result yet' : 'Result: ' + query[k]);
     else parts.push(`${k}: ${query[k]}`);
   }

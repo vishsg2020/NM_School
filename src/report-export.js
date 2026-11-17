@@ -87,7 +87,7 @@ async function buildWorkbook(db, data, month, user) {
     ['Pre-tests', null],
     ['Candidates added', counts.candidates_added], ['Pre-test results recorded', counts.results], ['Results Confirmed', counts.confirmed],
     ['Admissions', null],
-    ['New admissions', data.totals.admissions_in_month], ['Admitted fee value', counts.admitted_value, true],
+    ['New admissions', data.totals.admissions_in_month], ['Renewals', data.totals.renewals_in_month], ['Admitted fee value', counts.admitted_value, true],
     ['Fees', null],
     [month === 'all' ? 'Fees collected (all time)' : 'Fees collected in the month', data.totals.collected_in_month, true], ['Pending fees (now)', data.totals.pending_total, true], ['Overdue fees (now)', data.totals.overdue_total, true],
     ['Classes', null],

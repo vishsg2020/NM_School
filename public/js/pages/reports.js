@@ -38,6 +38,7 @@ export async function render(page, { query }) {
     <div class="metric-groups">
       <section class="metric-group"><h2>${label}</h2>
         <a class="metric" href="${all ? '#/students' : `#/students?admitted=${month}`}"><span class="metric-label">Admissions</span><span class="metric-value">${r.totals.admissions_in_month}</span></a>
+        <a class="metric" href="${all ? '#/students?status=renewed' : `#/students?status=renewed&renewed=${month}`}"><span class="metric-label">Renewals</span><span class="metric-value">${r.totals.renewals_in_month}</span></a>
         <a class="metric" href="${all ? '#/payments?status=Paid' : `#/payments?status=Paid&date_from=${month}-01&date_to=${month}-31`}"><span class="metric-label">Fees collected</span><span class="metric-value">${inr(r.totals.collected_in_month)}</span></a></section>
       <section class="metric-group"><h2>Outstanding now</h2>
         <a class="metric" href="#/payments?status=Pending"><span class="metric-label">Pending fees</span><span class="metric-value">${inr(r.totals.pending_total)}</span></a>
@@ -90,6 +91,7 @@ export async function render(page, { query }) {
         { label: 'Sales rep', cell: s => esc(s.name) },
         { label: 'Candidates added', cls: 'num', cell: s => esc(s.candidates_added) },
         { label: 'Admissions', cls: 'num', cell: s => esc(s.admissions) },
+        { label: 'Renewals', cls: 'num', cell: s => esc(s.renewals) },
         { label: 'Admitted fee value', cls: 'num', cell: s => esc(inr(s.admitted_fee_value)) },
         { label: all ? 'Collected' : 'Collected in month', cls: 'num', cell: s => esc(inr(s.collected_in_month)) },
       ], r.by_sales_rep, { empty: 'No sales activity this month' }))}

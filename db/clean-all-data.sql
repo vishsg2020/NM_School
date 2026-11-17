@@ -20,7 +20,7 @@ BEGIN
 END $$;
 
 -- All school records (and their numbering).
-TRUNCATE TABLE feedback, notifications, pretest_files, payments, classes, enrollments, students,
+TRUNCATE TABLE payment_followups, feedback, notifications, pretest_files, payments, classes, enrollments, students,
                pretest_results, candidates, teacher_slots, teacher_hours, sessions, login_failures, audit_events
   RESTART IDENTITY;
 

@@ -174,6 +174,28 @@ list already filtered ("Also filtered by … · Clear").
 - Charts are plain SVG drawn by `public/js/charts.js` (no library, no inline styles, so the strict CSP stays).
 - The acceptance tests check the chart totals against the Payments, Students, Class Activity and Pre-Test lists.
 
+## Fee reminders, renewals, teacher pay and missed classes
+
+- **Fee reminders (Payments → "To chase").** Overdue payments and those due in the next 7 days. "WhatsApp reminder" opens
+  WhatsApp with the message typed in (you press Send) and records who sent it and when; "Note" keeps a note and a
+  promised / next follow-up date. Both appear in the payment's History. The message and your UPI / bank details are set
+  in Settings → Fee reminders. The dashboard shows "Fees to chase".
+- **Renewals.** Students → "Finishing soon" lists Active courses with 3 or fewer classes left and no renewal. "Renew"
+  fills in the teacher's recommended next level, the same teacher and slot, and a start date after the current course.
+  The renewal is saved as **Upcoming** (classes can already be booked) and becomes **Active** automatically when the
+  current course's last class is completed; that course is then marked Completed. "Start this course now" starts it
+  early. Renewals are counted separately from new admissions everywhere (dashboard, charts, reports).
+- **Teacher pay (Manage → Teacher pay).** A monthly statement worked out from the class records; the app pays nobody.
+  Regular: monthly salary (per teacher, or the default in Settings) + ₹10 per completed 1:1 class + ₹45 per conducted
+  3:1 session; emergency absences ("Teacher Absent"): the first in the month is free with at least 10 minutes' notice,
+  each further one is a ₹200 fine. Freelance: ₹100 per class, ₹150 per session. Rates are in Settings → Teacher pay rates.
+  "Details" lists every class counted; the Excel has a Summary and one tab per teacher.
+- **Missed classes.** Marking a class Student Absent or Teacher Absent asks whether notice was given. Each missed class
+  adds a make-up class at the end, so the end date moves (the parent page shows it). Per course, 2 misses without notice
+  are free; from the 3rd, each is chargeable at the per-class rate (total fee ÷ classes). "Add extra-class charge" on the
+  student profile creates an **Extra** Pending payment per class, which then counts in reminders and totals.
+  Teacher-cancelled classes never count against the student. Classes marked absent before this change count as "with notice".
+
 ## Parent feedback
 
 - **After a class:** when a class is marked Completed, the teacher or Manager can copy a WhatsApp-ready message with a

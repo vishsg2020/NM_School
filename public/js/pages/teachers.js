@@ -64,6 +64,8 @@ function teacherForm(t, after) {
         <label class="check"><input type="checkbox" name="supports_3to1" ${t?.supports_3to1 ? 'checked' : ''}> 3:1 (up to three students per class)</label>
         <div class="field"></div>
       </fieldset>
+      <div class="field ${(t?.employment_type || 'Regular') === 'Regular' ? '' : 'hidden'}" id="t-sal-f"><label for="t-sal">Monthly salary (₹, Regular)</label><input id="t-sal" name="monthly_salary" type="number" min="0" value="${t?.monthly_salary}">
+        <div class="hint">For the Teacher pay statement. Leave blank to use the default in Settings.</div></div>
       <div class="field"><label for="t-cap">Monthly class capacity (sessions)</label><input id="t-cap" name="monthly_capacity" type="number" min="0" max="2000" value="${t?.monthly_capacity}">
         <div class="hint">Leave blank for no limit.</div></div>
       <fieldset><legend>Working hours</legend><div id="hours">${raw((t?.hours || []).map(h => windowRow(h, false)).join(''))}</div>
@@ -102,6 +104,7 @@ function teacherForm(t, after) {
         photo = p;
         d.querySelector('#t-avatar').innerHTML = `<img src="data:${p.type};base64,${await toBase64(p.blob)}" alt="Teacher photo">`;
       });
+      form.querySelector('#t-type').addEventListener('change', ev => form.querySelector('#t-sal-f').classList.toggle('hidden', ev.target.value !== 'Regular'));
       onSubmit(form, async v => {
         if (!v.name.trim()) throw Object.assign(new Error('Name is required'), { data: { field: 'Name *' } });
         const body = { ...v, hours: collect('#hours'), slots: collect('#slots') };

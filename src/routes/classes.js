@@ -1,6 +1,7 @@
 'use strict';
 const { requireRole } = require('../auth');
 const { audit, history } = require('../audit');
+const { refreshEndDate, activateRenewal } = require('../school-rules');
 const {
   bad, notFound, forbidden, conflict, str, int, oneOf, bool, isValidDate, isValidDateTime, isValidTime,
   weekdayOf, addMinutes, today, idParam,
@@ -123,7 +124,7 @@ module.exports = (app, { db }) => {
     const enrollment = await h.get('SELECT * FROM enrollments WHERE id = ?', [enrollmentId]);
     if (!enrollment) throw notFound('Enrollment');
     if (req.user.role === 'teacher' && enrollment.teacher_id !== req.user.teacher_id) throw notFound('Enrollment');
-    if (enrollment.status !== 'Active') throw bad(`Enrollment is ${enrollment.status}; classes can only be scheduled for Active enrollments`);
+    if (!['Active', 'Upcoming'].includes(enrollment.status)) throw bad(`Enrollment is ${enrollment.status}; classes can only be scheduled for Active or Upcoming courses`);
     let teacherId = enrollment.teacher_id;
     if (b.teacher_id && Number(b.teacher_id) !== enrollment.teacher_id) {
       if (req.user.role !== 'manager') throw forbidden();
@@ -282,6 +283,12 @@ module.exports = (app, { db }) => {
         if (!['Present', 'Late'].includes(c.attendance)) throw bad('A Completed class needs attendance Present or Late', { field: 'Attendance' });
         if (c.scheduled_at.slice(0, 10) > today()) throw bad('A class cannot be marked Completed before its date');
       }
+      // Missed classes: did the family / teacher tell us in advance? (Needed for extra charges and teacher pay.)
+      if (b.absence_notice !== undefined) c.absence_notice = oneOf(b.absence_notice || null, ['Yes', 'No'], { name: 'Notice given' });
+      const absent = ['Student Absent', 'Teacher Absent'].includes(c.status);
+      if (!absent) c.absence_notice = null;
+      else if (!c.absence_notice && c.status !== before.status)
+        throw bad(c.status === 'Student Absent' ? 'Say whether the family told us in advance' : 'Say whether the teacher gave at least 10 minutes\' notice', { field: 'Notice given' });
       if (c.status === 'Student Absent' && !c.attendance) c.attendance = 'Absent';
       if (c.status === 'Student Absent' && c.attendance !== 'Absent') throw bad('Student Absent requires attendance Absent');
       if (c.status !== before.status || c.attendance !== before.attendance || c.topics !== before.topics) {
@@ -291,7 +298,7 @@ module.exports = (app, { db }) => {
       await t.run(`UPDATE classes SET scheduled_at=@scheduled_at, duration_min=@duration_min, teacher_id=@teacher_id, status=@status, attendance=@attendance,
         topics=@topics, homework=@homework, notes=@notes, progress=@progress, next_class_date=@next_class_date,
         rating_participation=@rating_participation, rating_homework=@rating_homework, rating_progress=@rating_progress, parent_note=@parent_note,
-        recorded_by=@recorded_by, recorded_at=@recorded_at, updated_at=now_iso() WHERE id=@id`, c);
+        absence_notice=@absence_notice, recorded_by=@recorded_by, recorded_at=@recorded_at, updated_at=now_iso() WHERE id=@id`, c);
       // Exactly-once accounting, guarded by the `counted` flag in the same transaction.
       if (c.status === 'Completed') {
         const flip = await t.run('UPDATE classes SET counted = 1 WHERE id = ? AND counted = 0', [c.id]);
@@ -299,11 +306,13 @@ module.exports = (app, { db }) => {
           const inc = await t.run(`UPDATE enrollments SET completed_classes = completed_classes + 1, updated_at=now_iso()
             WHERE id = ? AND completed_classes < total_classes`, [c.enrollment_id]);
           if (!inc.rowCount) throw bad('All classes in this enrollment are already completed. Increase total classes first.');
+          await activateRenewal(t, c.enrollment_id, req.user, audit); // last class done → a waiting renewal starts
         }
       } else {
         const flip = await t.run('UPDATE classes SET counted = 0 WHERE id = ? AND counted = 1', [c.id]);
         if (flip.rowCount) await t.run('UPDATE enrollments SET completed_classes = completed_classes - 1, updated_at=now_iso() WHERE id = ?', [c.enrollment_id]);
       }
+      if (c.status !== before.status) await refreshEndDate(t, c.enrollment_id); // missed classes move the end date
       await audit(t, req.user, 'class', c.id, before.status !== c.status ? `status_${c.status}` : 'updated', before, c, str(b.reason, { max: 500 }));
     });
     const saved = await getClass(id);

@@ -947,3 +947,171 @@ test('Dashboard charts: Manager only; totals match the Payments, Students, Class
   assert.equal(wk.group, 'week'); assert.equal(wk.fees[0].period, '2026-09-28'); // the Monday of the week holding 1 Oct
   assert.equal((await M.get('/api/dashboard/trends?date_from=2020-01-01&date_to=2026-10-31&group=day')).status, 400); // too many bars
 });
+
+test('Round 4: fee reminders, missed classes and extra charges, teacher pay statement, renewals', async () => {
+  // A Regular teacher with wide hours so bookings don't clash with earlier tests.
+  let r = await M.post('/api/teachers', { name: 'Teacher Pay', employment_type: 'Regular', supports_1to1: true, supports_3to1: true,
+    hours: [1, 2, 3, 4, 5, 6].map(d => ({ weekday: d, start_time: '08:00', end_time: '21:00' })) });
+  assert.equal(r.status, 201, JSON.stringify(r.data)); const tp = r.data.id;
+  const admit = async (name, total, fee, extra = {}) => {
+    const c = (await M.post('/api/candidates', { age: 25, student_name: name, phone: '98' + Math.floor(1e7 + Math.random() * 8e7), pretest_teacher_id: tp })).data;
+    await M.put(`/api/candidates/${c.id}/result`, { recommended_course: 'Starter', assessment: 'ok', admission_status: 'Confirmed' });
+    const sid = (await M.get(`/api/candidates/${c.id}`)).data.student_id;
+    const e = await M.post('/api/admissions', { student_id: sid, course: 'Starter', class_mode: '1:1', slot_days: [1, 3, 5], slot_time: '18:00', total_classes: total,
+      teacher_id: tp, start_date: '2026-10-05', total_fee: fee, advance: { amount: fee / 2, status: 'Paid', date: '2026-10-05', method: 'UPI' },
+      final: { amount: fee / 2, status: 'Pending', date: '2026-10-20' }, ...extra });
+    assert.equal(e.status, 201, JSON.stringify(e.data));
+    return { sid, e: e.data };
+  };
+  const book = async (eid, at) => {
+    const x = await M.post('/api/classes', { enrollment_id: eid, scheduled_at: at, duration_min: 30, acknowledge_warnings: true });
+    assert.equal(x.status, 201, JSON.stringify(x.data)); return x.data[0].id;
+  };
+
+  // ---------- 1. Fee reminders and follow-up ----------
+  const { sid: s1, e: e1 } = await admit('Reminder Kid', 5, 1250);
+  assert.equal(e1.end_date, '2026-10-14'); // Mon/Wed/Fri from 5 Oct, 5 classes
+  r = await M.put('/api/settings/reminders', { payment_details: 'UPI: school@bank', template: 'Hi {parent}, {stage} {amount} {due}. {payment_details}' });
+  assert.equal(r.data.payment_details, 'UPI: school@bank');
+  assert.equal((await S.get('/api/settings/reminders')).status, 403);
+  const chase = (await M.get('/api/payments?status=chase')).data.rows;
+  assert.ok(chase.every(x => x.status === 'Pending' && x.date <= '2026-10-22'), 'chase = overdue or due within 7 days');
+  const fin1 = chase.find(x => x.enrollment_id === e1.id && x.stage === 'Final');
+  assert.ok(fin1, 'a Final due on 20 Oct (in 5 days) is in the chase list');
+  const dash = (await M.get('/api/dashboard')).data.metrics;
+  assert.equal(dash.fees_to_chase, chase.length);
+  assert.equal(dash.fees_to_chase_amount, chase.reduce((s, x) => s + x.amount, 0));
+  r = await M.post(`/api/payments/${fin1.id}/reminders`, {});
+  assert.equal(r.status, 201); assert.equal(r.data.reminders, 1);
+  assert.equal((await S.post(`/api/payments/${fin1.id}/reminders`, {})).status, 403);
+  const adv1 = (await M.get(`/api/payments?enrollment=${e1.id}&stage=Advance`)).data.rows[0];
+  assert.equal((await M.post(`/api/payments/${adv1.id}/reminders`, {})).status, 400); // already Paid
+  assert.equal((await M.post(`/api/payments/${fin1.id}/notes`, {})).status, 400);
+  assert.equal((await M.post(`/api/payments/${fin1.id}/notes`, { note: 'x', next_date: '2026-13-01' })).status, 400);
+  r = await M.post(`/api/payments/${fin1.id}/notes`, { note: 'Father will pay after salary', next_date: '2026-10-25' });
+  assert.equal(r.status, 201);
+  const row = (await M.get(`/api/payments?enrollment=${e1.id}&stage=Final`)).data.rows[0];
+  assert.equal(row.reminders, 1); assert.equal(row.last_note, 'Father will pay after salary'); assert.equal(row.next_date, '2026-10-25');
+  const hist = (await M.get(`/api/payments/${fin1.id}/history`)).data.map(h => h.action);
+  assert.ok(hist.includes('reminder_sent') && hist.includes('follow_up_note'));
+
+  // ---------- 2. Missed classes: make-ups move the end date; charges after 2 misses without notice ----------
+  const c = [];
+  for (const d of ['2026-10-05', '2026-10-07', '2026-10-09', '2026-10-12', '2026-10-14']) c.push(await book(e1.id, `${d}T18:00`));
+  r = await M.patch(`/api/classes/${c[0]}`, { status: 'Student Absent' });
+  assert.equal(r.status, 400); assert.match(r.data.error, /told us in advance/);
+  assert.equal((await M.patch(`/api/classes/${c[0]}`, { status: 'Student Absent', absence_notice: 'Yes' })).status, 200);
+  let en = (await M.get(`/api/enrollments/${e1.id}`)).data;
+  assert.equal(en.end_date, '2026-10-16'); // one make-up added at the end
+  for (const id of [c[1], c[2], c[3]]) assert.equal((await M.patch(`/api/classes/${id}`, { status: 'Student Absent', absence_notice: 'No' })).status, 200);
+  en = (await M.get(`/api/enrollments/${e1.id}`)).data;
+  assert.equal(en.end_date, '2026-10-23'); // 5 + 4 make-ups = 9 slots → Fri 23 Oct
+  assert.equal(en.completed_classes, 0, 'missed classes never use up the package');
+  let st = (await M.get(`/api/students/${s1}`)).data.enrollments.find(x => x.id === e1.id);
+  assert.equal(st.missed.student_absent, 4); assert.equal(st.missed.with_notice, 1); assert.equal(st.missed.without_notice, 3);
+  assert.equal(st.missed.free_used, 2); assert.equal(st.missed.chargeable, 1); assert.deepEqual(st.missed.unbilled, [c[3]]);
+  assert.equal(st.missed.rate, 250); // 1250 ÷ 5
+  // Teachers see the missed classes but not the money
+  const tUser = await M.post('/api/users', { name: 'tp', email: 'tp@x.in', password: pw, role: 'teacher', teacher_id: tp });
+  assert.equal(tUser.status, 201); const TP = client(); await TP.login('tp@x.in');
+  const tv = (await TP.get(`/api/students/${s1}`)).data.enrollments[0].missed;
+  assert.equal(tv.chargeable, 1); assert.equal(tv.rate, undefined);
+  assert.equal((await TP.post(`/api/enrollments/${e1.id}/extra-charges`, { amount: 250, due_date: '2026-10-22' })).status, 403);
+  // Bill it
+  assert.equal((await M.post(`/api/enrollments/${e1.id}/extra-charges`, { amount: 250 })).status, 400); // due date needed
+  r = await M.post(`/api/enrollments/${e1.id}/extra-charges`, { amount: 250, due_date: '2026-10-22' });
+  assert.equal(r.status, 201, JSON.stringify(r.data)); assert.equal(r.data.created, 1);
+  assert.equal((await M.post(`/api/enrollments/${e1.id}/extra-charges`, { amount: 250, due_date: '2026-10-22' })).status, 400); // nothing left to bill
+  const extra = (await M.get(`/api/payments?enrollment=${e1.id}&stage=Extra`)).data.rows;
+  assert.equal(extra.length, 1); assert.equal(extra[0].amount, 250); assert.equal(extra[0].class_id, c[3]);
+  en = (await M.get(`/api/enrollments/${e1.id}`)).data;
+  assert.equal(en.money.extra_charges, 250); assert.equal(en.money.outstanding, 1250 + 250 - 625);
+  // Its amount can be corrected; Advance/Final amounts still only change through the fee plan
+  assert.equal((await M.patch(`/api/payments/${extra[0].id}`, { amount: 200 })).data.amount, 200);
+  assert.equal((await M.patch(`/api/payments/${fin1.id}`, { amount: 1 })).status, 400);
+  // Fee plan edits leave the extra charge alone
+  assert.equal((await M.put(`/api/enrollments/${e1.id}/fee-plan`, { total_fee: 1300, advance_amount: 625, final_amount: 675, reason: 'test' })).status, 200);
+  assert.equal((await M.get(`/api/payments?enrollment=${e1.id}&stage=Extra`)).data.rows[0].amount, 200);
+  // Remove needs a reason; then the class can be billed again
+  assert.equal((await M.del(`/api/payments/${extra[0].id}`, {})).status, 400);
+  assert.equal((await M.del(`/api/payments/${fin1.id}`, { reason: 'x' })).status, 400); // only Extra
+  assert.equal((await M.del(`/api/payments/${extra[0].id}`, { reason: 'Parent was ill' })).status, 200);
+  assert.equal((await M.get(`/api/students/${s1}`)).data.enrollments[0].missed.unbilled.length, 1);
+  // Changing a missed class back to Completed moves the end date back
+  assert.equal((await M.patch(`/api/classes/${c[3]}`, { status: 'Completed', attendance: 'Present' })).status, 200);
+  en = (await M.get(`/api/enrollments/${e1.id}`)).data;
+  assert.equal(en.end_date, '2026-10-21'); assert.equal(en.completed_classes, 1);
+
+  // ---------- 3. Teacher pay statement ----------
+  // Teacher Pay (Regular) in Oct: 1 completed 1:1 (c[3]); 2 emergency absences (first with notice → free, second → ₹200).
+  r = await M.patch(`/api/classes/${c[4]}`, { status: 'Teacher Absent' });
+  assert.equal(r.status, 400); assert.match(r.data.error, /notice/);
+  assert.equal((await M.patch(`/api/classes/${c[4]}`, { status: 'Teacher Absent', absence_notice: 'Yes' })).status, 200);
+  const { e: e2 } = await admit('Pay Kid', 4, 1000);
+  const g = await book(e2.id, '2026-10-06T19:00');
+  assert.equal((await M.patch(`/api/classes/${g}`, { status: 'Teacher Absent', absence_notice: 'Yes' })).status, 200);
+  assert.equal((await M.patch(`/api/teachers/${tp}`, { monthly_salary: 15000 })).status, 200);
+  assert.equal((await S.get('/api/teacher-pay?month=2026-10')).status, 403);
+  assert.equal((await TP.get('/api/teacher-pay?month=2026-10')).status, 403);
+  assert.equal((await M.get('/api/teacher-pay?month=2026-99')).status, 400);
+  let pay = (await M.get('/api/teacher-pay?month=2026-10')).data;
+  let line = pay.teachers.find(x => x.id === tp);
+  assert.equal(line.salary, 15000); assert.equal(line.classes_1to1, 1); assert.equal(line.rate_1to1, 10);
+  assert.equal(line.absences, 2); assert.equal(line.fines, 200, 'first absence with notice is free, the second is fined');
+  assert.equal(line.total, 15000 + 10 - 200);
+  assert.equal(pay.total, pay.teachers.reduce((s, x) => s + x.total, 0));
+  // Every teacher's counts equal the Class Activity list for the month
+  for (const t of pay.teachers) {
+    const done = (await M.get(`/api/classes?teacher=${t.id}&status=Completed&date_from=2026-10-01&date_to=2026-10-31`)).data;
+    assert.equal(t.classes_1to1, done.filter(x => x.format === '1:1').length, t.name);
+    assert.equal(t.sessions_3to1, new Set(done.filter(x => x.format === '3:1').map(x => x.scheduled_at)).size, t.name + ' sessions');
+  }
+  // Freelance: per-class pay, no salary, no fines; rates come from Settings
+  const fr = pay.teachers.find(x => x.employment_type === 'Freelance');
+  if (fr) { assert.equal(fr.salary, 0); assert.equal(fr.fines, 0); assert.equal(fr.total, fr.classes_1to1 * 100 + fr.sessions_3to1 * 150); }
+  r = await M.put('/api/settings/pay-rates', { regular_salary: 14000, regular_1to1: 12, regular_3to1: 45, absence_fine: 250, freelance_1to1: 100, freelance_3to1: 150 });
+  assert.equal(r.status, 200);
+  line = (await M.get(`/api/teacher-pay/${tp}?month=2026-10`)).data;
+  assert.equal(line.total, 15000 + 12 - 250); assert.equal(line.details.absences.length, 2); assert.equal(line.details.classes_1to1[0].class_code, (await M.get(`/api/classes/${c[3]}`)).data.class_code);
+  const xl = await M.raw('/api/teacher-pay-export?month=2026-10');
+  assert.equal(xl.status, 200); assert.match(xl.headers.get('content-type'), /spreadsheetml/);
+  assert.match(xl.headers.get('content-disposition'), /teacher-pay-2026-10\.xlsx/);
+
+  // ---------- 4. Renewals ----------
+  const { sid: s3, e: e3 } = await admit('Renew Kid', 2, 500);
+  const fin = (await M.get('/api/students?status=finishing')).data;
+  assert.ok(fin.some(x => x.id === s3), 'a course with 2 classes left is finishing soon');
+  const renewBody = { course: 'Reader', class_mode: '1:1', total_classes: 30, teacher_id: tp, start_date: '2026-10-19', slot_days: [1, 3, 5], slot_time: '18:00',
+    total_fee: 7500, advance: { amount: 3750, status: 'Pending', date: '2026-10-17' }, final: { amount: 3750, status: 'Pending', date: '2026-11-17' } };
+  assert.equal((await S.post(`/api/enrollments/${e3.id}/renew`, renewBody)).status, 403);
+  assert.equal((await M.post(`/api/enrollments/${e3.id}/renew`, { ...renewBody, total_fee: 7000 })).status, 422); // Advance + Final must add up
+  const key = 'renew-' + Date.now();
+  r = await M.post(`/api/enrollments/${e3.id}/renew`, { ...renewBody, idempotency_key: key });
+  assert.equal(r.status, 201, JSON.stringify(r.data));
+  const e4 = r.data;
+  assert.equal(e4.status, 'Upcoming'); assert.equal(e4.renewal_of, e3.id); assert.equal(e4.sales_rep_id, e3.sales_rep_id);
+  assert.equal((await M.post(`/api/enrollments/${e3.id}/renew`, { ...renewBody, idempotency_key: key })).data.id, e4.id, 'repeat click returns the same renewal');
+  assert.equal((await M.post(`/api/enrollments/${e3.id}/renew`, renewBody)).status, 409);
+  assert.ok(!(await M.get('/api/students?status=finishing')).data.some(x => x.id === s3), 'renewed courses leave the finishing list');
+  // Renewals are counted separately from new admissions
+  const tr = (await M.get('/api/dashboard/trends?date_from=2026-10-01&date_to=2026-10-31')).data.totals;
+  const admittedList = (await M.get('/api/students?status=enrolled&admitted_from=2026-10-01&admitted_to=2026-10-31')).data;
+  assert.equal(tr.admissions, admittedList.length); assert.ok(tr.renewals >= 1);
+  const dm = (await M.get('/api/dashboard')).data.metrics;
+  assert.equal(dm.renewals_month, (await M.get('/api/students?status=renewed&renewed=2026-10')).data.length);
+  // Classes can be booked for the Upcoming course; it becomes Active when the current course's last class is completed
+  assert.equal((await M.post('/api/classes', { enrollment_id: e4.id, scheduled_at: '2026-10-19T18:00', duration_min: 30, acknowledge_warnings: true })).status, 201);
+  const k1 = await book(e3.id, '2026-10-12T18:30'); const k2 = await book(e3.id, '2026-10-14T18:30');
+  assert.equal((await M.patch(`/api/classes/${k1}`, { status: 'Completed', attendance: 'Present' })).status, 200);
+  assert.equal((await M.get(`/api/enrollments/${e4.id}`)).data.status, 'Upcoming');
+  assert.equal((await TP.patch(`/api/classes/${k2}`, { status: 'Completed', attendance: 'Present' })).status, 200);
+  assert.equal((await M.get(`/api/enrollments/${e3.id}`)).data.status, 'Completed');
+  assert.equal((await M.get(`/api/enrollments/${e4.id}`)).data.status, 'Active');
+  // Start early: an Upcoming renewal of e1 can be started by the Manager; e1 becomes Completed
+  r = await M.post(`/api/enrollments/${e1.id}/renew`, { ...renewBody, idempotency_key: 'r2-' + Date.now() });
+  assert.equal(r.data.status, 'Upcoming');
+  assert.equal((await M.post(`/api/enrollments/${e3.id}/start`, {})).status, 400); // not Upcoming
+  assert.equal((await M.post(`/api/enrollments/${r.data.id}/start`, { reason: 'Moving up early' })).status, 200);
+  assert.equal((await M.get(`/api/enrollments/${e1.id}`)).data.status, 'Completed');
+  assert.equal((await M.get(`/api/enrollments/${r.data.id}`)).data.status, 'Active');
+});

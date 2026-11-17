@@ -54,7 +54,8 @@ module.exports = (app, { db }) => {
     const W = {
       paid: ['p.status = \'Paid\'', ...range('p.date'), ...enr].join(' AND '),
       open: ['p.status = \'Pending\'', ...enr].join(' AND '),
-      adm: [...range('e.admission_date'), ...enr].join(' AND '),
+      adm: ['e.renewal_of IS NULL', ...range('e.admission_date'), ...enr].join(' AND '), // renewals are counted separately
+      ren: ['e.renewal_of IS NOT NULL', ...range('e.admission_date'), ...enr].join(' AND '),
       cls: ['cl.status = \'Completed\'', ...range('substr(cl.scheduled_at,1,10)'), '(@teacher::int IS NULL OR cl.teacher_id = @teacher)',
         '(@rep::int IS NULL OR e.sales_rep_id = @rep)', '(@format::text IS NULL OR cl.format = @format)'].join(' AND '),
       pre: [...range(RESULT_DAY), '(@teacher::int IS NULL OR c.pretest_teacher_id = @teacher)', '(@rep::int IS NULL OR c.sales_rep_id = @rep)'].join(' AND '),
@@ -70,6 +71,7 @@ module.exports = (app, { db }) => {
         (SELECT COUNT(*) FROM enrollments e WHERE ${W.adm} AND e.class_mode = '1:1') AS admissions_1to1,
         (SELECT COUNT(*) FROM enrollments e WHERE ${W.adm} AND e.class_mode = '3:1') AS admissions_3to1,
         (SELECT MIN(e.admission_date) FROM enrollments e WHERE ${W.adm}) AS first_admission,
+        (SELECT COUNT(*) FROM enrollments e WHERE ${W.ren}) AS renewals,
         (SELECT COUNT(DISTINCT ${SESSION_KEY}) ${CLS} WHERE ${W.cls}) AS sessions,
         (SELECT COUNT(*) ${CLS} WHERE ${W.cls}) AS class_records,
         (SELECT COALESCE(SUM(p.amount),0) ${PAY} WHERE ${W.open}) AS pending,

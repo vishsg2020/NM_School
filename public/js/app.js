@@ -8,6 +8,7 @@ import * as teachers from './pages/teachers.js';
 import * as reports from './pages/reports.js';
 import * as users from './pages/users.js';
 import * as settings from './pages/settings.js';
+import * as pay from './pages/pay.js';
 import { openNotifications, refreshBell } from './pages/notifications.js';
 
 const app = document.getElementById('app');
@@ -28,6 +29,7 @@ const NAV = [
   ] },
   { group: 'Manage', items: [
     { path: 'teachers', label: 'Teachers', roles: ['manager'] },
+    { path: 'pay', label: 'Teacher pay', roles: ['manager'] },
     { path: 'reports', label: 'Reports', roles: ['manager'] },
     { path: 'users', label: 'Users', roles: ['manager'] },
     { path: 'settings', label: 'Settings', roles: ['manager'] },
@@ -48,6 +50,7 @@ const ROUTES = {
   reports: reports.render,
   users: users.render,
   settings: settings.render,
+  pay: pay.render,
   account: users.renderAccount,
 };
 

@@ -1,14 +1,15 @@
 import { api, get, esc, html, raw, pill, onSubmit, toast, fmtStamp, confirmBox, copyText } from '../core.js';
 
 export async function render(page, { query }) {
-  const [g, fb, terms] = await Promise.all([get('/api/settings/google'), get('/api/settings/feedback'), get('/api/settings/terms')]);
+  const [g, fb, terms, rem, pay] = await Promise.all([get('/api/settings/google'), get('/api/settings/feedback'), get('/api/settings/terms'), get('/api/settings/reminders'), get('/api/settings/pay-rates')]);
+  const rate = (k, label) => html`<div class="field"><label for="pr-${k}">${label} (₹)</label><input id="pr-${k}" name="${k}" type="number" min="0" value="${pay.rates[k]}"></div>`;
   const account = g.account_email || g.suggested_account;
   const status = g.connected
     ? (g.last_error ? pill('Needs attention', 'red') : pill('Connected', 'green'))
     : pill('Not connected', 'amber');
 
   page.innerHTML = html`<div class="page-head"><div><h1>Settings</h1>
-      <div class="sub">Parent feedback, student page terms and the Google account used for Meet links.</div></div></div>
+      <div class="sub">Fee reminders, teacher pay rates, parent feedback, student page terms and the Google account used for Meet links.</div></div></div>
     ${raw(query.google === 'connected' ? '<div class="notice info" role="status">Google account connected. New confirmed pre-tests will get a Meet link.</div>' : '')}
     ${raw(query.google === 'error' ? `<div class="notice error" role="alert">Could not connect Google: ${esc(query.msg || 'unknown error')}</div>` : '')}
 
@@ -21,6 +22,29 @@ export async function render(page, { query }) {
         ${raw(g.client_id && g.has_client_secret ? `<button class="btn primary" type="button" id="connect">${g.connected ? 'Reconnect Google account' : 'Connect Google account'}</button>` : '')}
         ${raw(g.connected ? '<button class="btn danger" type="button" id="disconnect">Disconnect</button>' : '')}
       </div>
+    </section>
+
+    <section class="panel"><h2>Fee reminders (WhatsApp)</h2>
+      <p class="small muted">Used by “WhatsApp reminder” on the Payments page. You press Send in WhatsApp; the app only records that a reminder went out.
+        Words in braces are filled in: {parent} {student} {course} {stage} {amount} {due} {payment_details}.</p>
+      <form id="rem-form" novalidate>
+        <div class="field"><label for="rem-pd">Payment details shown to parents</label><textarea id="rem-pd" name="payment_details" rows="3" maxlength="500" placeholder="e.g. UPI: yourname@bank · A/c 1234… IFSC …">${rem.payment_details}</textarea>
+          <div class="hint">${raw(rem.payment_details ? '' : '<b>Not set yet.</b> Add your UPI ID or bank details so parents know where to pay.')}</div></div>
+        <div class="field"><label for="rem-t">Message</label><textarea id="rem-t" name="template" rows="5" maxlength="2000">${rem.template}</textarea></div>
+        <div class="row"><button class="btn" type="submit">Save reminder settings</button><button class="btn" type="button" id="rem-default">Use the default message</button></div>
+      </form>
+    </section>
+
+    <section class="panel"><h2>Teacher pay rates</h2>
+      <p class="small muted">Used by Teacher pay. A Regular teacher's own salary (Teachers → Edit) replaces the default salary.</p>
+      <form id="pay-rates" novalidate>
+        <h3 class="small">Regular teachers</h3>
+        <div class="grid3">${raw(rate('regular_salary', 'Default monthly salary'))}${raw(rate('regular_1to1', 'Per 1:1 class'))}${raw(rate('regular_3to1', 'Per 3:1 session'))}</div>
+        <div class="grid3">${raw(rate('absence_fine', 'Fine per emergency absence (after the first with notice)'))}</div>
+        <h3 class="small">Freelance teachers</h3>
+        <div class="grid3">${raw(rate('freelance_1to1', 'Per 1:1 class'))}${raw(rate('freelance_3to1', 'Per 3:1 session'))}</div>
+        <div class="row"><button class="btn" type="submit">Save pay rates</button></div>
+      </form>
     </section>
 
     <section class="panel"><h2>Parent feedback after classes</h2>
@@ -78,6 +102,9 @@ export async function render(page, { query }) {
   });
   onSubmit(page.querySelector('#terms-form'), async v => { await api('PUT', '/api/settings/terms', v); toast('Terms saved'); });
   page.querySelector('#terms-default').addEventListener('click', () => { page.querySelector('#terms-t').value = terms.default; });
+  onSubmit(page.querySelector('#rem-form'), async v => { await api('PUT', '/api/settings/reminders', v); toast('Reminder settings saved'); });
+  page.querySelector('#rem-default').addEventListener('click', () => { page.querySelector('#rem-t').value = rem.default_template; });
+  onSubmit(page.querySelector('#pay-rates'), async v => { await api('PUT', '/api/settings/pay-rates', v); toast('Pay rates saved'); });
   onSubmit(page.querySelector('#fb-form'), async v => { await api('PUT', '/api/settings/feedback', v); toast('Feedback setting saved'); });
   onSubmit(page.querySelector('#g-form'), async v => {
     await api('PUT', '/api/settings/google', v);

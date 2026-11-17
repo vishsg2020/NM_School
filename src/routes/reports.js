@@ -28,7 +28,10 @@ module.exports = (app, { db }) => {
       const m = await many({
         total_students: 'SELECT COUNT(*) n FROM students',
         active_enrollments: `SELECT COUNT(*) n FROM enrollments WHERE status='Active'`,
-        new_admissions_month: `SELECT COUNT(*) n FROM enrollments WHERE substr(admission_date,1,7) = @month`,
+        new_admissions_month: `SELECT COUNT(*) n FROM enrollments WHERE renewal_of IS NULL AND substr(admission_date,1,7) = @month`,
+        renewals_month: `SELECT COUNT(*) n FROM enrollments WHERE renewal_of IS NOT NULL AND substr(admission_date,1,7) = @month`,
+        finishing_soon: `SELECT COUNT(*) n FROM enrollments x WHERE x.status = 'Active' AND x.total_classes - x.completed_classes <= 3
+          AND NOT EXISTS (SELECT 1 FROM enrollments y WHERE y.renewal_of = x.id)`,
         awaiting_setup: `SELECT COUNT(*) n FROM students s JOIN pretest_results pr ON pr.candidate_id = s.candidate_id
           AND pr.admission_status='Confirmed' WHERE NOT EXISTS (SELECT 1 FROM enrollments e WHERE e.student_id = s.id)`,
         scheduled_pretests: `SELECT COUNT(*) n FROM candidates WHERE status = 'Scheduled'`,
@@ -45,7 +48,9 @@ module.exports = (app, { db }) => {
         overdue_fees: `SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Pending' AND date < @t`,
         students_pending_payments: `SELECT COUNT(DISTINCT e.student_id) n FROM payments p JOIN enrollments e ON e.id = p.enrollment_id WHERE p.status='Pending'`,
         overdue_students: `SELECT COUNT(DISTINCT e.student_id) n FROM payments p JOIN enrollments e ON e.id = p.enrollment_id WHERE p.status='Pending' AND p.date < @t`,
-      }, { month, t });
+        fees_to_chase: `SELECT COUNT(*) n FROM payments WHERE status='Pending' AND date <= @soon`,
+        fees_to_chase_amount: `SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Pending' AND date <= @soon`,
+      }, { month, t, soon: new Date(Date.parse(t + 'T00:00:00Z') + 7 * 864e5).toISOString().slice(0, 10) });
       const upcoming_pretests = (await db.all(`SELECT c.id, c.lead_id, c.student_name, c.pretest_at, c.status, c.time_confirmation, t.name teacher_name
         FROM candidates c LEFT JOIN teachers t ON t.id = c.pretest_teacher_id
         WHERE c.status IN ('Scheduled','Follow-up') AND c.pretest_at >= @t ORDER BY c.pretest_at LIMIT 8`, { t }));
@@ -123,7 +128,7 @@ module.exports = (app, { db }) => {
     };
     const MONTH_IN = col => `substr(${col},1,7) = ANY(CAST(@months AS text[]))`;
     const [adm, cand, done, canc, coll] = [
-      await byMonth(`SELECT substr(admission_date,1,7) m, COUNT(*) n FROM enrollments WHERE ${MONTH_IN('admission_date')} GROUP BY 1`),
+      await byMonth(`SELECT substr(admission_date,1,7) m, COUNT(*) n FROM enrollments WHERE renewal_of IS NULL AND ${MONTH_IN('admission_date')} GROUP BY 1`),
       await byMonth(`SELECT substr(created_at,1,7) m, COUNT(*) n FROM candidates WHERE ${MONTH_IN('created_at')} GROUP BY 1`),
       await byMonth(`SELECT substr(scheduled_at,1,7) m, COUNT(*) n FROM classes WHERE counted=1 AND ${MONTH_IN('scheduled_at')} GROUP BY 1`),
       await byMonth(`SELECT substr(scheduled_at,1,7) m, COUNT(*) n FROM classes WHERE status IN ('Cancelled','Teacher Absent','Student Absent') AND ${MONTH_IN('scheduled_at')} GROUP BY 1`),
@@ -175,7 +180,8 @@ module.exports = (app, { db }) => {
     const by_sales_rep = (await db.all(`
       SELECT u.id, u.name, u.role,
         (SELECT COUNT(*) FROM candidates c WHERE c.sales_rep_id=u.id AND (@month = 'all' OR substr(c.created_at,1,7) = @month)) AS candidates_added,
-        (SELECT COUNT(*) FROM enrollments e WHERE e.sales_rep_id=u.id AND (@month = 'all' OR substr(e.admission_date,1,7) = @month)) AS admissions,
+        (SELECT COUNT(*) FROM enrollments e WHERE e.sales_rep_id=u.id AND e.renewal_of IS NULL AND (@month = 'all' OR substr(e.admission_date,1,7) = @month)) AS admissions,
+        (SELECT COUNT(*) FROM enrollments e WHERE e.sales_rep_id=u.id AND e.renewal_of IS NOT NULL AND (@month = 'all' OR substr(e.admission_date,1,7) = @month)) AS renewals,
         (SELECT COALESCE(SUM(e.total_fee),0) FROM enrollments e WHERE e.sales_rep_id=u.id AND (@month = 'all' OR substr(e.admission_date,1,7) = @month)) AS admitted_fee_value,
         (SELECT COALESCE(SUM(p.amount),0) FROM payments p JOIN enrollments e ON e.id=p.enrollment_id
            WHERE e.sales_rep_id=u.id AND p.status='Paid' AND (@month = 'all' OR substr(p.date,1,7) = @month)) AS collected_in_month
@@ -184,7 +190,8 @@ module.exports = (app, { db }) => {
 
     const totals = await many({
       collected_in_month: `SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Paid' AND (@month = 'all' OR substr(date,1,7) = @month)`,
-      admissions_in_month: `SELECT COUNT(*) n FROM enrollments WHERE (@month = 'all' OR substr(admission_date,1,7) = @month)`,
+      admissions_in_month: `SELECT COUNT(*) n FROM enrollments WHERE renewal_of IS NULL AND (@month = 'all' OR substr(admission_date,1,7) = @month)`,
+      renewals_in_month: `SELECT COUNT(*) n FROM enrollments WHERE renewal_of IS NOT NULL AND (@month = 'all' OR substr(admission_date,1,7) = @month)`,
       pending_total: `SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Pending'`,
       overdue_total: `SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Pending' AND date < @t`,
     }, { month, t });

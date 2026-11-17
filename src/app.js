@@ -57,6 +57,8 @@ function createApp(db) {
   require('./routes/classes')(app, ctx);
   require('./routes/reports')(app, ctx);
   require('./routes/trends')(app, ctx);
+  require('./routes/followups')(app, ctx);
+  require('./routes/pay')(app, ctx);
   require('./routes/settings')(app, ctx);
   require('./routes/notifications')(app, ctx);
   require('./routes/feedback')(app, ctx);

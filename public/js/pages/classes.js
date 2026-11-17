@@ -187,6 +187,11 @@ export async function activityForm(id, after, { focus } = {}) {
           ${raw(lockedStatus ? '<div class="hint">Completed classes can only be changed by the Manager.</div>' : '')}</div>
         <div class="field"><label for="a-att">Attendance</label><select id="a-att" name="attendance">${raw(options(['Present', 'Late', 'Absent'], c.attendance, 'Not recorded'))}</select></div>
       </div>
+      <fieldset id="notice-box" class="hidden"><legend id="notice-q">Did the family tell us in advance? *</legend>
+        <label class="check"><input type="radio" name="absence_notice" value="Yes" ${c.absence_notice === 'Yes' ? 'checked' : ''}> <span id="notice-yes">Yes, informed before the class</span></label>
+        <label class="check"><input type="radio" name="absence_notice" value="No" ${c.absence_notice === 'No' ? 'checked' : ''}> No notice</label>
+        <p class="small muted" id="notice-hint"></p>
+      </fieldset>
       <div class="field"><label for="a-top">Topics covered</label><textarea id="a-top" name="topics">${c.topics}</textarea></div>
       <div class="field"><label for="a-hw">Homework</label><textarea id="a-hw" name="homework">${c.homework}</textarea></div>
       <div class="field"><label for="a-prog">Learning progress</label><textarea id="a-prog" name="progress" placeholder="What the student can now do">${c.progress}</textarea></div>
@@ -225,6 +230,18 @@ export async function activityForm(id, after, { focus } = {}) {
       const rateBox = form.querySelector('#rate-box');
       const syncRate = () => rateBox.classList.toggle('hidden', !['Completed'].includes(st.value) && !c.rating_participation);
       st.addEventListener('change', syncRate); syncRate();
+      // Missed class: ask whether notice was given (extra charges for students; fines for teachers).
+      const noticeBox = form.querySelector('#notice-box');
+      const syncNotice = () => {
+        const s = st.value; noticeBox.classList.toggle('hidden', !['Student Absent', 'Teacher Absent'].includes(s));
+        const student = s === 'Student Absent';
+        form.querySelector('#notice-q').textContent = student ? 'Did the family tell us in advance? *' : 'Did the teacher give at least 10 minutes\' notice? *';
+        form.querySelector('#notice-yes').textContent = student ? 'Yes, informed before the class' : 'Yes, at least 10 minutes before';
+        form.querySelector('#notice-hint').textContent = student
+          ? 'The missed class does not use up the package: a make-up class is added at the end and the end date moves. After 2 misses without notice, further ones are charged.'
+          : 'A make-up class is added at the end. Counts as an emergency absence on the teacher pay statement.';
+      };
+      st.addEventListener('change', syncNotice); syncNotice();
       d.querySelector('#fb-link')?.addEventListener('click', async ev => {
         try {
           const r = await api('POST', `/api/classes/${c.id}/feedback-link`);
@@ -242,6 +259,10 @@ export async function activityForm(id, after, { focus } = {}) {
         const body = { attendance: v.attendance || null, topics: v.topics, homework: v.homework, progress: v.progress, notes: v.notes, next_class_date: v.next_class_date, reason: v.reason,
           rating_participation: v.rating_participation ?? null, rating_homework: v.rating_homework ?? null, rating_progress: v.rating_progress ?? null, parent_note: v.parent_note };
         if (!lockedStatus) body.status = v.status;
+        if (['Student Absent', 'Teacher Absent'].includes(v.status)) {
+          if (!v.absence_notice && v.status !== c.status) throw new Error(v.status === 'Student Absent' ? 'Say whether the family told us in advance' : 'Say whether the teacher gave notice');
+          if (v.absence_notice) body.absence_notice = v.absence_notice;
+        }
         const teacherChanged = v.new_teacher && Number(v.new_teacher) !== c.teacher_id;
         if (v.new_date && (`${v.new_date}T${v.new_time}` !== c.scheduled_at || Number(v.duration_min) !== c.duration_min || teacherChanged)) {
           if (v.status !== 'Scheduled') throw new Error('Change the class or change its status, not both at once');

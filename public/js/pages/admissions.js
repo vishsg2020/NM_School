@@ -61,15 +61,23 @@ const payCard = (stage, d) => html`
   </div>`;
 
 /** Admission setup drawer. s: { student_id, student_code, candidate_id, student_name, lead_id, sales_rep_name, recommended_course } */
-export function openAdmission(s, after) {
+/**
+ * Admission form. With { renew: enrollment } it renews that course instead: same student, teacher and slot filled in,
+ * the teacher's recommended next level as the course, and a start date after the current course ends.
+ */
+export function openAdmission(s, after, { renew = null } = {}) {
   const key = uid();
   const t = todayLocal();
+  const COURSE_NEXT = renew && COURSES.includes(renew.next_level) ? renew.next_level : renew ? renew.course : s.recommended_course;
+  const startDefault = renew ? (renew.end_date && renew.end_date >= t ? addDays(renew.end_date, 1) : t) : t;
+  const daysDefault = renew && renew.slot_days ? renew.slot_days.split(',').map(Number) : [1, 3, 5];
   drawer({
-    title: `Admission: ${s.student_name}`,
+    title: renew ? `Renew ${s.student_name.split(' ')[0]}'s course` : `Admission: ${s.student_name}`,
     wide: true,
     body: html`<form id="adm-form" novalidate>
-      <p class="muted small">Lead ${s.lead_id} · Sales rep ${s.sales_rep_name} (kept for attribution)</p>
-      <fieldset><legend>Student identity</legend>
+      ${raw(renew ? html`<p class="muted small">${renew.course} · ${renew.class_mode} ${renew.status === 'Completed' || renew.remaining_classes === 0 ? 'has finished' : `finishes ${renew.end_date ? fmtDate(renew.end_date) : 'soon'} (${renew.remaining_classes} class${renew.remaining_classes === 1 ? '' : 'es'} left)`}. The new course is saved as Upcoming and starts automatically when the last class is completed. Sales rep ${s.sales_rep_name} stays the same.</p>`
+        : html`<p class="muted small">Lead ${s.lead_id} · Sales rep ${s.sales_rep_name} (kept for attribution)</p>`)}
+      <fieldset ${raw(renew ? 'class="hidden" disabled' : '')}><legend>Student identity</legend>
         <div class="ident">
           <div><label class="avatar" for="a-photo" id="a-avatar"><span>Student photo<br>(optional)</span></label>
             <input id="a-photo" class="sr-only" type="file" accept="image/*"><div class="small muted center">Tap to add</div></div>
@@ -86,21 +94,21 @@ export function openAdmission(s, after) {
       </fieldset>
       <fieldset><legend>Course</legend>
         <div class="grid3">
-          <div class="field"><label for="a-course">Course *</label><select id="a-course" name="course">${raw(options(COURSES, s.recommended_course, 'Select'))}</select>
-            <div class="hint">Pre-test recommended: ${s.recommended_course}</div></div>
-          <div class="field"><label for="a-mode">Class mode *</label><select id="a-mode" name="class_mode">${raw(options([['1:1', '1:1 (one student)'], ['3:1', '3:1 (group of up to 3)']], '1:1'))}</select></div>
-          <div class="field"><label for="a-teacher">Teaching teacher *</label><select id="a-teacher" name="teacher_id">${raw(teacherOptions('', { mode: '1:1' }))}</select>
-            <div class="hint">Can differ from the pre-test teacher.</div></div>
+          <div class="field"><label for="a-course">Course *</label><select id="a-course" name="course">${raw(options(COURSES, COURSE_NEXT, 'Select'))}</select>
+            <div class="hint">${renew ? (renew.next_level ? `Teacher's recommendation: ${renew.next_level}` : 'No end-of-course report yet') : `Pre-test recommended: ${s.recommended_course}`}</div></div>
+          <div class="field"><label for="a-mode">Class mode *</label><select id="a-mode" name="class_mode">${raw(options([['1:1', '1:1 (one student)'], ['3:1', '3:1 (group of up to 3)']], renew ? renew.class_mode : '1:1'))}</select></div>
+          <div class="field"><label for="a-teacher">Teaching teacher *</label><select id="a-teacher" name="teacher_id">${raw(teacherOptions(renew ? renew.teacher_id : '', { mode: renew ? renew.class_mode : '1:1' }))}</select>
+            <div class="hint">${renew ? 'The same teacher is filled in; you can change it.' : 'Can differ from the pre-test teacher.'}</div></div>
         </div>
       </fieldset>
       <fieldset><legend>Preferred time slot &amp; dates</legend>
         <div class="field"><span class="label">Days *</span><div class="chips" role="group" aria-label="Preferred days">
-          ${raw(DAYS.map((d, i) => `<label class="chip"><input type="checkbox" name="d${i}" ${[1, 3, 5].includes(i) ? 'checked' : ''}><span>${d}</span></label>`).join(''))}
+          ${raw(DAYS.map((d, i) => `<label class="chip"><input type="checkbox" name="d${i}" ${daysDefault.includes(i) ? 'checked' : ''}><span>${d}</span></label>`).join(''))}
         </div></div>
         <div class="grid3">
-          <div class="field"><label for="a-time">Time (IST) *</label><input id="a-time" name="slot_time" type="time" value="17:00"></div>
-          <div class="field"><label for="a-start">Start date *</label><input id="a-start" name="start_date" type="date" value="${t}"></div>
-          <div class="field"><label for="a-classes">Total classes *</label><input id="a-classes" name="total_classes" type="number" min="1" max="1000" inputmode="numeric" value="30"></div>
+          <div class="field"><label for="a-time">Time (IST) *</label><input id="a-time" name="slot_time" type="time" value="${renew?.slot_time || '17:00'}"></div>
+          <div class="field"><label for="a-start">Start date *</label><input id="a-start" name="start_date" type="date" value="${startDefault}"></div>
+          <div class="field"><label for="a-classes">Total classes *</label><input id="a-classes" name="total_classes" type="number" min="1" max="1000" inputmode="numeric" value="${renew ? renew.total_classes : 30}"></div>
         </div>
         <div class="end" id="a-end" aria-live="polite"></div>
         <div id="a-slot"></div>
@@ -114,12 +122,13 @@ export function openAdmission(s, after) {
         <div class="field"><label for="a-fee">Total course fee (₹) *</label><div class="money"><span aria-hidden="true">₹</span><input id="a-fee" name="total_fee" type="number" min="0" step="1" inputmode="numeric"></div></div>
       </fieldset>
       <fieldset><legend>Payments</legend>
-        <div class="pays">${raw(payCard('Advance', { status: 'Paid', date: t, method: 'UPI' }))}${raw(payCard('Final', { status: 'Pending', date: addDays(t, 30) }))}</div>
+        <div class="pays">${raw(renew ? payCard('Advance', { status: 'Pending', date: startDefault > t ? addDays(startDefault, -2) : t }) + payCard('Final', { status: 'Pending', date: addDays(startDefault, 30) })
+          : payCard('Advance', { status: 'Paid', date: t, method: 'UPI' }) + payCard('Final', { status: 'Pending', date: addDays(t, 30) }))}</div>
         <div class="sum" id="a-sum"></div>
       </fieldset>
       <div class="field"><label for="a-notes">Notes</label><textarea id="a-notes" name="notes" maxlength="2000"></textarea></div>
     </form>`,
-    foot: '<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" form="adm-form">Save admission</button>',
+    foot: `<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" form="adm-form">${renew ? 'Save renewal' : 'Save admission'}</button>`,
     onMount: (d, close) => {
       const form = d.querySelector('#adm-form');
       const $ = sel => form.querySelector(sel);
@@ -169,7 +178,7 @@ export function openAdmission(s, after) {
           if (!$('#a-teacher').value || !days.length || !$('#a-time').value || !$('#a-start').value || !$('#a-classes').value) { box.innerHTML = ''; return; }
           const my = ++slotSeq;
           try {
-            const r = await api('POST', '/api/admissions/slot-check', { teacher_id: $('#a-teacher').value, class_mode: $('#a-mode').value,
+            const r = await api('POST', '/api/admissions/slot-check', { enrollment_id: renew ? renew.id : undefined, teacher_id: $('#a-teacher').value, class_mode: $('#a-mode').value,
               slot_days: days, slot_time: $('#a-time').value, start_date: $('#a-start').value, total_classes: $('#a-classes').value });
             if (my !== slotSeq) return;
             box.innerHTML = r.warnings.length
@@ -235,7 +244,7 @@ export function openAdmission(s, after) {
       syncCard('Advance'); syncCard('Final'); suggest(); drawEnd(); drawSum(); checkSlot();
 
       onSubmit(form, async v => {
-        const missing = [['student_code', 'Student ID'], ['course', 'Course'], ['teacher_id', 'Teaching teacher'], ['slot_time', 'Time (IST)'], ['start_date', 'Start date'], ['total_classes', 'Total classes'], ['total_fee', 'Total course fee'], ['Advance_amount', 'Advance amount'], ['Final_amount', 'Final amount']]
+        const missing = [...(renew ? [] : [['student_code', 'Student ID']]), ['course', 'Course'], ['teacher_id', 'Teaching teacher'], ['slot_time', 'Time (IST)'], ['start_date', 'Start date'], ['total_classes', 'Total classes'], ['total_fee', 'Total course fee'], ['Advance_amount', 'Advance amount'], ['Final_amount', 'Final amount']]
           .filter(([k]) => v[k] === '' || v[k] === undefined).map(([, l]) => l);
         if (!slotDays().length) missing.push('Days');
         for (const st of ['Advance', 'Final']) if (v[st + '_status'] === 'Paid' && !v[st + '_method']) missing.push(`${st} method`);
@@ -246,6 +255,14 @@ export function openAdmission(s, after) {
           throw new Error(`Advance ${inr(adv)} + Final ${inr(fin)} = ${inr(adv + fin)}, which is ${inr(diff)} ${adv + fin < fee ? 'less' : 'more'} than the Total Course Fee of ${inr(fee)}. Adjust the amounts so they add up exactly.`);
         }
         const pay = st => ({ amount: v[st + '_amount'], status: v[st + '_status'], date: v[st + '_date'], method: v[st + '_status'] === 'Paid' ? (v[st + '_method'] || null) : null, reference: v[st + '_status'] === 'Paid' ? v[st + '_reference'] : '' });
+        if (renew) {
+          await api('POST', `/api/enrollments/${renew.id}/renew`, {
+            course: v.course, class_mode: v.class_mode, teacher_id: v.teacher_id, start_date: v.start_date, slot_days: slotDays(), slot_time: v.slot_time,
+            total_classes: v.total_classes, total_fee: v.total_fee, notes: v.notes, advance: pay('Advance'), final: pay('Final'), idempotency_key: key,
+          });
+          close(); toast('Renewal saved: the next course is Upcoming'); after && after();
+          return;
+        }
         await api('POST', '/api/admissions', {
           student_id: s.student_id, student_code: v.student_code, aadhaar: v.aadhaar,
           course: v.course, class_mode: v.class_mode, teacher_id: v.teacher_id, start_date: v.start_date,
@@ -283,8 +300,8 @@ export async function renderPayments(page, { query }) {
     <div class="sub">Paid counts as collected. Pending is outstanding; it becomes overdue only after its due date.</div></div></div>
     <form class="filters" id="pf" role="search" aria-label="Filter payments">
       <div class="field grow"><label for="p-q">Search</label><input id="p-q" name="q" type="search" value="${f.q}" placeholder="Student, Lead ID, reference"></div>
-      <div class="field"><label for="p-st">Status</label><select id="p-st" name="status">${raw(options(['Paid', 'Pending', 'Overdue'], f.status, 'All'))}</select></div>
-      <div class="field"><label for="p-stage">Stage</label><select id="p-stage" name="stage">${raw(options(['Advance', 'Final'], f.stage, 'Both'))}</select></div>
+      <div class="field"><label for="p-st">Status</label><select id="p-st" name="status">${raw(options([['Paid', 'Paid'], ['Pending', 'Pending'], ['Overdue', 'Overdue'], ['chase', 'To chase (overdue + due in 7 days)']], f.status, 'All'))}</select></div>
+      <div class="field"><label for="p-stage">Stage</label><select id="p-stage" name="stage">${raw(options([['Advance', 'Advance'], ['Final', 'Final'], ['Extra', 'Extra classes']], f.stage, 'All'))}</select></div>
       <div class="field"><label for="p-from">Date from</label><input id="p-from" name="date_from" type="date" value="${f.date_from}"></div>
       <div class="field"><label for="p-to">Date to</label><input id="p-to" name="date_to" type="date" value="${f.date_to}"></div>
       ${raw(linked.hidden)}
@@ -295,6 +312,7 @@ export async function renderPayments(page, { query }) {
       <button type="button" class="rchip" data-range="this">This month</button>
       <button type="button" class="rchip" data-range="last">Last month</button>
       <button type="button" class="rchip" data-range="all">All time</button>
+      <button type="button" class="rchip" data-range="chase">To chase (overdue + due in 7 days)</button>
     </div>
     <div class="kpis" id="p-kpis" aria-live="polite"></div>
     <p class="result-count" id="p-tot" aria-live="polite"></p>
@@ -302,8 +320,10 @@ export async function renderPayments(page, { query }) {
   const form = page.querySelector('#pf'); const list = page.querySelector('#p-list');
   let rows = [];
   let seq = 0;
+  let remind = null; // reminder message settings, loaded once
   async function load() {
     const d = Object.fromEntries(new FormData(form)); setQuery(d);
+    if (!remind) remind = await get('/api/settings/reminders').catch(() => null);
     const my = ++seq;
     try {
       const r = await get('/api/payments' + '?' + new URLSearchParams(Object.entries(d).filter(([, v]) => v)));
@@ -315,18 +335,20 @@ export async function renderPayments(page, { query }) {
         <div class="kpi"><span class="l">Received</span><span class="v">${esc(inr(sm.received))}</span><span class="s">${sm.received_count} payments · ${esc(rangeLabel)}</span></div>
         <a class="kpi" href="#/payments?status=Pending"><span class="l">Pending (all)</span><span class="v">${esc(inr(sm.pending))}</span><span class="s">${sm.pending_count} payments</span></a>
         <a class="kpi ${sm.overdue ? 'bad' : ''}" href="#/payments?status=Overdue"><span class="l">Overdue</span><span class="v">${esc(inr(sm.overdue))}</span><span class="s">${sm.overdue_count} payments</span></a>`;
-      const which = !d.date_from && !d.date_to ? 'all' : d.date_from === monthStart(0) && d.date_to === monthEnd(0) ? 'this' : d.date_from === monthStart(-1) && d.date_to === monthEnd(-1) ? 'last' : '';
+      const which = d.status === 'chase' ? 'chase' : !d.date_from && !d.date_to ? 'all' : d.date_from === monthStart(0) && d.date_to === monthEnd(0) ? 'this' : d.date_from === monthStart(-1) && d.date_to === monthEnd(-1) ? 'last' : '';
       page.querySelectorAll('[data-range]').forEach(b => b.classList.toggle('on', b.dataset.range === which));
       page.querySelector('#p-tot').textContent = `${r.totals.count} payment${r.totals.count === 1 ? '' : 's'} · Paid ${inr(r.totals.paid)} · Pending ${inr(r.totals.pending)} · Overdue ${inr(r.totals.overdue)}`;
       list.innerHTML = table([
         { label: 'Student', cell: x => `<a href="#/student/${x.student_id}">${esc(x.student_name)}</a><span class="sub">${esc(x.lead_id)} · ${esc(x.course)}</span>` },
         { label: 'Stage', cell: x => esc(x.stage) },
         { label: 'Amount', cls: 'num', cell: x => esc(inr(x.amount)) },
-        { label: 'Status', cell: x => (x.overdue ? pill('Overdue').__raw : pill(x.status).__raw) },
+        { label: 'Status', cell: x => dueBadge(x, r.today) },
         { label: 'Date', cell: x => `${esc(fmtDate(x.date))}<span class="sub">${x.status === 'Paid' ? 'received' : 'due'}</span>` },
         { label: 'Method / ref', cell: x => esc([x.method, x.reference].filter(Boolean).join(' · ') || '—') },
         { label: 'Contact', cell: x => `${esc(x.parent_name || '')}<span class="sub">${esc(x.phone)}</span>` },
-        { label: 'Actions', cls: 'cell-actions', cell: x => `<button class="btn small" type="button" data-pay="${x.id}">Update</button> <button class="btn small" type="button" data-hist="${x.id}">History</button>` },
+        { label: 'Follow-up', cell: x => followCell(x) },
+        { label: 'Actions', cls: 'cell-actions', cell: x => (x.status === 'Pending' ? `<a class="btn small primary" target="_blank" rel="noopener" data-remind="${x.id}" href="${esc(whatsappUrl(x, remind, r.today))}">WhatsApp reminder</a> <button class="btn small" type="button" data-note="${x.id}">Note</button> ` : '')
+          + `<button class="btn small" type="button" data-pay="${x.id}">Update</button> <button class="btn small" type="button" data-hist="${x.id}">History</button>` },
       ], rows, { empty: 'No payments match these filters' });
     } catch (e) { if (my === seq) list.innerHTML = stateBox('error', 'Could not load payments', e.message); }
   }
@@ -335,6 +357,9 @@ export async function renderPayments(page, { query }) {
   form.addEventListener('submit', e => { e.preventDefault(); load(); });
   page.querySelector('#p-range').addEventListener('click', e => {
     const b = e.target.closest('[data-range]'); if (!b) return;
+    const st = form.querySelector('#p-st');
+    if (b.dataset.range === 'chase') { st.value = 'chase'; form.querySelector('#p-from').value = ''; form.querySelector('#p-to').value = ''; load(); return; }
+    if (st.value === 'chase') st.value = '';
     const off = { this: 0, last: -1 }[b.dataset.range];
     form.querySelector('#p-from').value = off === undefined ? '' : monthStart(off);
     form.querySelector('#p-to').value = off === undefined ? '' : monthEnd(off);
@@ -343,6 +368,14 @@ export async function renderPayments(page, { query }) {
   wireLinked(page, load);
   page.querySelector('#p-clear').addEventListener('click', () => { clearLinked(page); form.reset(); form.querySelectorAll('input,select').forEach(x => { x.value = ''; }); load(); });
   list.addEventListener('click', async e => {
+    const rm = e.target.closest('[data-remind]');
+    if (rm) { // WhatsApp opens from the link itself; record that a reminder was sent.
+      if (!remind?.payment_details) toast('Tip: add your UPI / bank details in Settings so they appear in the reminder');
+      api('POST', `/api/payments/${rm.dataset.remind}/reminders`).then(load).catch(err => toast(err.message, 'error'));
+      return;
+    }
+    const nt = e.target.closest('[data-note]');
+    if (nt) { followUpForm(rows.find(x => String(x.id) === nt.dataset.note), load); return; }
     const p = e.target.closest('[data-pay]'); const h = e.target.closest('[data-hist]');
     if (p) paymentForm(rows.find(x => String(x.id) === p.dataset.pay), load);
     if (h) {
@@ -353,11 +386,66 @@ export async function renderPayments(page, { query }) {
   await load();
 }
 
+// ---------- Fee follow-up ----------
+const STAGE_WORD = { Advance: 'advance', Final: 'final', Extra: 'extra-class' };
+function dueBadge(x, today) {
+  if (x.status === 'Paid') return pill('Paid').__raw;
+  const days = Math.round((Date.parse(x.date) - Date.parse(today)) / 864e5);
+  if (days < 0) return `<span class="pill red">Overdue ${-days} day${days === -1 ? '' : 's'}</span>`;
+  if (days === 0) return '<span class="pill amber">Due today</span>';
+  if (days <= 7) return `<span class="pill amber">Due in ${days} day${days === 1 ? '' : 's'}</span>`;
+  return pill('Pending').__raw;
+}
+function followCell(x) {
+  if (x.status === 'Paid') return '<span class="muted">—</span>';
+  const parts = [];
+  if (x.next_date) parts.push(`<b>Next: ${esc(fmtDate(x.next_date))}</b>`);
+  if (x.last_note) parts.push(`<span class="sub">${esc(x.last_note)}</span>`);
+  parts.push(`<span class="sub">${x.reminders ? `Reminded ${x.reminders}× · last ${esc(fmtStamp(x.last_reminder_at))}` : 'Not reminded yet'}</span>`);
+  return parts.join('');
+}
+/** The parent's WhatsApp number in international form (Indian 10-digit numbers get 91 in front). */
+function waNumber(phone) {
+  let d = String(phone || '').replace(/\D/g, '').replace(/^00/, '');
+  if (d.length === 11 && d.startsWith('0')) d = d.slice(1);
+  if (d.length === 10) d = '91' + d;
+  return d;
+}
+export function reminderText(x, s, today) {
+  const tpl = (s && s.template) || '';
+  const fill = {
+    parent: x.parent_name || 'there', student: (x.student_name || '').split(' ')[0], course: x.course || '', stage: STAGE_WORD[x.stage] || x.stage,
+    amount: inr(x.amount), due: x.date < today ? `was due on ${fmtDate(x.date)}` : `is due on ${fmtDate(x.date)}`,
+    payment_details: (s && s.payment_details) || '',
+  };
+  return tpl.replace(/\{(\w+)\}/g, (m, k) => (k in fill ? fill[k] : m)).split('\n').filter(l => l.trim()).join('\n');
+}
+const whatsappUrl = (x, s, today) => `https://wa.me/${waNumber(x.phone)}?text=${encodeURIComponent(reminderText(x, s, today))}`;
+
+function followUpForm(x, after) {
+  drawer({
+    title: `Follow-up: ${x.student_name}`,
+    body: html`<form id="fu-form" novalidate>
+      <p class="muted">${x.stage} fee ${inr(x.amount)} · due ${fmtDate(x.date)}${raw(x.reminders ? ` · reminded ${x.reminders}×` : '')}</p>
+      <div class="field"><label for="fu-note">Note</label><textarea id="fu-note" name="note" rows="3" maxlength="1000" placeholder="e.g. Father said he will pay after salary"></textarea></div>
+      <div class="field"><label for="fu-next">Promised / next follow-up date</label><input id="fu-next" name="next_date" type="date" value="${x.next_date || ''}"></div>
+      <p class="small muted">Notes and reminders are kept in the payment's History.</p>
+    </form>`,
+    foot: '<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" form="fu-form">Save note</button>',
+    onMount: (d, close) => onSubmit(d.querySelector('#fu-form'), async v => {
+      await api('POST', `/api/payments/${x.id}/notes`, v);
+      close(); toast('Note saved'); after && after();
+    }),
+  });
+}
+
 export function paymentForm(p, after) {
   drawer({
     title: `${p.stage} payment${p.student_name ? ': ' + p.student_name : ''}`,
     body: html`<form id="pay-form" novalidate>
-      <p class="muted">Amount ${inr(p.amount)}. To change amounts, use “Edit fee plan” on the student profile.</p>
+      ${raw(p.stage === 'Extra'
+        ? `<div class="field"><label for="pf-amt">Amount (₹)</label><input id="pf-amt" name="amount" type="number" min="1" value="${p.amount}" ${p.status === 'Paid' ? 'readonly' : ''}><div class="hint">Charge for a missed class without notice.</div></div>`
+        : `<p class="muted">Amount ${inr(p.amount)}. To change amounts, use “Edit fee plan” on the student profile.</p>`)}
       <div class="grid2">
         <div class="field"><label for="pf-st">Status</label><select id="pf-st" name="status">${raw(options(['Pending', 'Paid'], p.status))}</select></div>
         <div class="field"><label for="pf-date" id="pf-date-l">${p.status === 'Paid' ? 'Received date' : 'Due date'}</label><input id="pf-date" name="date" type="date" value="${p.date}"></div>
@@ -366,16 +454,22 @@ export function paymentForm(p, after) {
       </div>
       <div class="field"><label for="pf-reason">Reason / note for the audit history</label><input id="pf-reason" name="reason" maxlength="500" placeholder="Required when reverting Paid to Pending"></div>
     </form>`,
-    foot: '<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" form="pay-form">Save payment</button>',
+    foot: (p.stage === 'Extra' && p.status === 'Pending' ? '<button class="btn danger" type="button" id="pf-remove">Remove charge</button>' : '')
+      + '<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" form="pay-form">Save payment</button>',
     onMount: (d, close) => {
       const form = d.querySelector('#pay-form');
+      d.querySelector('#pf-remove')?.addEventListener('click', async () => {
+        const reason = form.querySelector('#pf-reason').value.trim();
+        if (!reason) { toast('Write the reason first', 'error'); form.querySelector('#pf-reason').focus(); return; }
+        try { await api('DELETE', `/api/payments/${p.id}`, { reason }); close(); toast('Charge removed'); after && after(); } catch (err) { toast(err.message, 'error'); }
+      });
       const st = form.querySelector('#pf-st');
       st.addEventListener('change', () => {
         form.querySelector('#pf-date-l').textContent = st.value === 'Paid' ? 'Received date' : 'Due date';
         if (st.value === 'Paid' && p.status === 'Pending') form.querySelector('#pf-date').value = todayLocal();
       });
       onSubmit(form, async v => {
-        await api('PATCH', `/api/payments/${p.id}`, { ...v, method: v.method || null });
+        await api('PATCH', `/api/payments/${p.id}`, { ...v, method: v.method || null, ...(v.amount !== undefined ? { amount: Number(v.amount) } : {}) });
         close(); toast('Payment saved'); after && after();
       });
     },

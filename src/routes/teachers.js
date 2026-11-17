@@ -41,7 +41,7 @@ function parseWindows(list, { withFormat, label }) {
 }
 
 function teacherInput(b, existing = {}) {
-  const t = existing.id ? { ...existing } : { phone: null, email: null, monthly_capacity: null, notes: null, about: null };
+  const t = existing.id ? { ...existing } : { phone: null, email: null, monthly_capacity: null, notes: null, about: null, monthly_salary: null };
   if (b.name !== undefined || !existing.id) t.name = str(b.name, { required: true, name: 'Name', max: 100 });
   if (b.phone !== undefined) t.phone = str(b.phone, { name: 'Phone', max: 30 });
   if (b.email !== undefined) t.email = str(b.email, { name: 'Email', max: 200 });
@@ -53,6 +53,8 @@ function teacherInput(b, existing = {}) {
   if (b.notes !== undefined) t.notes = str(b.notes, { name: 'Notes', max: 1000 });
   // Short introduction shown to parents on the student page.
   if (b.about !== undefined) t.about = str(b.about, { name: 'About', max: 400 });
+  // Regular teachers: monthly salary for the pay statement (empty = the default in Settings).
+  if (b.monthly_salary !== undefined) t.monthly_salary = b.monthly_salary === '' || b.monthly_salary === null ? null : int(b.monthly_salary, { min: 0, max: 1_000_000, name: 'Monthly salary' });
   return t;
 }
 
@@ -119,8 +121,8 @@ module.exports = (app, { db }) => {
     const slots = parseWindows(req.body.slots || [], { label: 'Availability slots', withFormat: true });
     checkSlotsInsideHours(hours, slots);
     const id = await db.tx(async tx => {
-      const r = await tx.get(`INSERT INTO teachers (name, phone, email, employment_type, supports_1to1, supports_3to1, monthly_capacity, notes, about)
-        VALUES (@name, @phone, @email, @employment_type, @supports_1to1, @supports_3to1, @monthly_capacity, @notes, @about) RETURNING id`, t);
+      const r = await tx.get(`INSERT INTO teachers (name, phone, email, employment_type, supports_1to1, supports_3to1, monthly_capacity, notes, about, monthly_salary)
+        VALUES (@name, @phone, @email, @employment_type, @supports_1to1, @supports_3to1, @monthly_capacity, @notes, @about, @monthly_salary) RETURNING id`, t);
       await saveWindows(tx, r.id, hours, slots);
       await audit(tx, req.user, 'teacher', r.id, 'created', null, { ...t, hours, slots });
       return r.id;
@@ -155,7 +157,7 @@ module.exports = (app, { db }) => {
     await db.tx(async tx => {
       await tx.run(`UPDATE teachers SET name=@name, phone=@phone, email=@email, employment_type=@employment_type,
         supports_1to1=@supports_1to1, supports_3to1=@supports_3to1, monthly_capacity=@monthly_capacity,
-        notes=@notes, about=@about, active=@active, updated_at=now_iso() WHERE id=@id`, t);
+        notes=@notes, about=@about, monthly_salary=@monthly_salary, active=@active, updated_at=now_iso() WHERE id=@id`, t);
       if (req.body.hours !== undefined || req.body.slots !== undefined) await saveWindows(tx, before.id, hours, slots);
       if (t.active === 0) {
         const u = await tx.get('SELECT id FROM users WHERE teacher_id = ?', [before.id]);
