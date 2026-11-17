@@ -2,7 +2,7 @@
 -- Nalla Malayalam — CLEAN ALL DATA (keep only Manager logins)
 --
 -- Run ONCE in Supabase → SQL Editor on the database you want to empty. It CANNOT be undone.
--- Deletes: candidates, pre-test results and files, students, enrollments, payments, classes,
+-- Deletes: call leads and calls, rep targets, candidates, pre-test results and files, students, enrollments, payments, classes,
 --          feedback, notifications, change history, teachers (with hours/slots), Sales and Teacher logins.
 -- Keeps:   Manager logins (same email and password), Settings (Google connection, feedback frequency),
 --          and the tables themselves.
@@ -20,7 +20,7 @@ BEGIN
 END $$;
 
 -- All school records (and their numbering).
-TRUNCATE TABLE payment_followups, feedback, notifications, pretest_files, payments, classes, enrollments, students,
+TRUNCATE TABLE lead_calls, leads, rep_targets, payment_followups, feedback, notifications, pretest_files, payments, classes, enrollments, students,
                pretest_results, candidates, teacher_slots, teacher_hours, sessions, login_failures, audit_events
   RESTART IDENTITY;
 
@@ -37,6 +37,7 @@ SELECT setval(pg_get_serial_sequence('teachers', 'id'), 1, false);
 ALTER SEQUENCE lead_number_seq RESTART WITH 1;
 ALTER SEQUENCE class_number_seq RESTART WITH 1;
 ALTER SEQUENCE student_code_seq RESTART WITH 1;
+ALTER SEQUENCE call_lead_seq RESTART WITH 1;
 
 COMMIT;
 

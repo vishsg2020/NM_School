@@ -52,6 +52,12 @@ module.exports = (app, { db }) => {
     const b = req.body;
     const next = { ...before };
     if (b.name !== undefined) next.name = str(b.name, { required: true, name: 'Name', max: 100 });
+    // Email can be changed, e.g. to give a login to a rep added by the calls import.
+    if (b.email !== undefined && String(b.email).trim().toLowerCase() !== String(before.email).toLowerCase()) {
+      next.email = str(b.email, { required: true, name: 'Email', max: 200 });
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(next.email)) throw bad('Enter a valid email address', { field: 'Email' });
+      if (await db.get('SELECT 1 AS x FROM users WHERE lower(email) = lower(?) AND id <> ?', [next.email, before.id])) throw conflict('A user with this email already exists');
+    }
     if (b.active !== undefined) {
       next.active = bool(b.active) ? 1 : 0;
       if (!next.active && before.id === req.user.id) throw bad('You cannot deactivate your own account');
@@ -61,7 +67,7 @@ module.exports = (app, { db }) => {
       }
     }
     await db.tx(async t => {
-      await t.run('UPDATE users SET name = ?, active = ? WHERE id = ?', [next.name, next.active, before.id]);
+      await t.run('UPDATE users SET name = ?, email = ?, active = ? WHERE id = ?', [next.name, next.email, next.active, before.id]);
       if (b.password) {
         await t.run('UPDATE users SET password_hash = ? WHERE id = ?', [hashPassword(b.password), before.id]);
         await audit(t, req.user, 'user', before.id, 'password_reset');

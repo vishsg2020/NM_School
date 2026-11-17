@@ -520,3 +520,12 @@ a.kpi:hover { border-color: #B7C4BE; }
 .linked-note { margin-top: -4px; }
 @media (max-width: 960px) { .chart-grid { grid-template-columns: 1fr; } }
 .pay-total { text-align: right; font-size: 16px; margin: 12px 0 4px; }
+
+/* ---------- Calls ---------- */
+.tabs { display: flex; gap: 6px; margin: 0 0 12px; flex-wrap: wrap; }
+.tabs .tab { border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; font: 500 14px var(--sans); background: var(--surface); color: var(--ink); text-decoration: none; }
+.tabs .tab.on { background: var(--green-soft); border-color: var(--brand); color: var(--green); font-weight: 600; }
+.tabs .tab b { background: var(--brand); color: var(--brand-ink); border-radius: 10px; padding: 0 7px; font-size: 12px; margin-left: 6px; }
+.resp-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.found { background: var(--green-soft); border: 1px solid #CFE6C2; border-radius: 8px; padding: 10px 12px; font-size: 14px; margin-bottom: 12px; }
+.chip input:focus-visible + span { outline: 3px solid var(--green); outline-offset: 2px; }

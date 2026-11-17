@@ -196,6 +196,36 @@ list already filtered ("Also filtered by … · Clear").
   student profile creates an **Extra** Pending payment per class, which then counts in reminders and totals.
   Teacher-cancelled classes never count against the student. Classes marked absent before this change count as "with notice".
 
+## Calls (tele team)
+
+**Pre-tests → Calls** replaces the Sales Management Google Sheet. Sales Team members see their own leads and unassigned
+ones; the Manager sees all and can reassign.
+
+- **Log a call** starts from the phone number: a known number shows its lead and earlier calls; a new number creates a lead
+  (`LD-00001`). Options follow the sheet — categories NM, KVS, Online Course, Other; call status Called / No Action;
+  responses Connected, Not Available, Call Later, Interested, Interested – Price Issue, Pre Test Booked, Sent More Info,
+  Not Interested (editable in Settings → Call options; the four that drive the lists are always kept).
+- **Lists:** Call later (needs a call-back date; overdue first), Reconnect (Not Available), Interested (Interested, Price
+  Issue, Sent More Info), Pre-test booked, All leads. Worked out from each lead's latest call; nothing is stored.
+- **Pre Test Booked** opens Add pre-test candidate with the lead's details; the candidate stays linked to the lead.
+  A lead becomes **Closed Won** when that student is admitted, **Closed Lost** after Not Interested (a later call reopens it).
+- **Summary & targets** (Manager): new leads, calls, pre-tests booked, admitted and conversion per rep for a month, and
+  monthly targets (admissions count and minimum conversion) with On track / Behind on count / Low conversion / Needs
+  attention. Admitted = new admissions credited to the rep (same as Reports); conversion = admitted ÷ new leads assigned
+  to the rep that month. Reps see their own progress on their dashboard.
+
+**Importing the old sheet** (download it from Google Sheets as .xlsx):
+
+```bash
+DATABASE_URL="<supabase uri>" npm run import:calls -- "/path/Sales_Management.xlsx" --dry-run   # summary only, saves nothing
+DATABASE_URL="<supabase uri>" npm run import:calls -- "/path/Sales_Management.xlsx"             # import
+```
+
+Leads keep their sheet Lead IDs (`NM-20261001-…`) and the Activity History becomes their calls. Running it again skips
+what is already in. Reps named in the sheet without a login (e.g. Rasika) are added as inactive Sales Team users; to let
+them sign in, open Users → Edit, set their real email and a password, and tick "Can sign in". The sheet has no call-back
+times, so imported Call Later leads show as due now.
+
 ## Parent feedback
 
 - **After a class:** when a class is marked Completed, the teacher or Manager can copy a WhatsApp-ready message with a

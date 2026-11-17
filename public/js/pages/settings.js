@@ -1,7 +1,7 @@
 import { api, get, esc, html, raw, pill, onSubmit, toast, fmtStamp, confirmBox, copyText } from '../core.js';
 
 export async function render(page, { query }) {
-  const [g, fb, terms, rem, pay] = await Promise.all([get('/api/settings/google'), get('/api/settings/feedback'), get('/api/settings/terms'), get('/api/settings/reminders'), get('/api/settings/pay-rates')]);
+  const [g, fb, terms, rem, pay, co] = await Promise.all([get('/api/settings/google'), get('/api/settings/feedback'), get('/api/settings/terms'), get('/api/settings/reminders'), get('/api/settings/pay-rates'), get('/api/call-options')]);
   const rate = (k, label) => html`<div class="field"><label for="pr-${k}">${label} (₹)</label><input id="pr-${k}" name="${k}" type="number" min="0" value="${pay.rates[k]}"></div>`;
   const account = g.account_email || g.suggested_account;
   const status = g.connected
@@ -33,6 +33,14 @@ export async function render(page, { query }) {
         <div class="field"><label for="rem-t">Message</label><textarea id="rem-t" name="template" rows="5" maxlength="2000">${rem.template}</textarea></div>
         <div class="row"><button class="btn" type="submit">Save reminder settings</button><button class="btn" type="button" id="rem-default">Use the default message</button></div>
       </form>
+    </section>
+
+    <section class="panel"><h2>Call options (tele team)</h2>
+      <p class="small muted">The choices in “Log a call”, one per line. Not Available, Call Later, Pre Test Booked and Not Interested are always kept because they drive the call queues.</p>
+      <form id="co-form" novalidate><div class="grid2">
+        <div class="field"><label for="co-c">Categories</label><textarea id="co-c" name="categories" rows="6">${co.categories.join('\n')}</textarea></div>
+        <div class="field"><label for="co-r">Responses</label><textarea id="co-r" name="responses" rows="9">${co.responses.join('\n')}</textarea></div>
+      </div><button class="btn" type="submit">Save call options</button></form>
     </section>
 
     <section class="panel"><h2>Teacher pay rates</h2>
@@ -104,6 +112,7 @@ export async function render(page, { query }) {
   page.querySelector('#terms-default').addEventListener('click', () => { page.querySelector('#terms-t').value = terms.default; });
   onSubmit(page.querySelector('#rem-form'), async v => { await api('PUT', '/api/settings/reminders', v); toast('Reminder settings saved'); });
   page.querySelector('#rem-default').addEventListener('click', () => { page.querySelector('#rem-t').value = rem.default_template; });
+  onSubmit(page.querySelector('#co-form'), async v => { await api('PUT', '/api/settings/call-options', v); toast('Call options saved'); });
   onSubmit(page.querySelector('#pay-rates'), async v => { await api('PUT', '/api/settings/pay-rates', v); toast('Pay rates saved'); });
   onSubmit(page.querySelector('#fb-form'), async v => { await api('PUT', '/api/settings/feedback', v); toast('Feedback setting saved'); });
   onSubmit(page.querySelector('#g-form'), async v => {

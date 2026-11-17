@@ -27,7 +27,7 @@ function userForm(u, teachers, users, after) {
     title: editing ? `Edit ${u.name}` : 'Add user',
     body: html`<form id="u-form" novalidate>
       <div class="field"><label for="u-name">Name *</label><input id="u-name" name="name" required maxlength="100" value="${u?.name}"></div>
-      ${raw(editing ? `<p class="muted">${esc(u.email)} · ${esc(roleName(u.role))}</p>` : html`
+      ${raw(editing ? html`<div class="field"><label for="u-email">Email *</label><input id="u-email" name="email" type="email" required autocomplete="off" value="${u.email}"></div><p class="muted">${roleName(u.role)}</p>` : html`
         <div class="field"><label for="u-email">Email *</label><input id="u-email" name="email" type="email" required autocomplete="off"></div>
         <div class="field"><label for="u-role">Role *</label><select id="u-role" name="role">${raw(options([['sales', 'Sales Team'], ['teacher', 'Teacher'], ['manager', 'Manager']], 'sales'))}</select></div>
         <div class="field hidden" id="u-teacher-f"><label for="u-teacher">Teacher record *</label><select id="u-teacher" name="teacher_id">${raw(options(freeTeachers.map(t => [t.id, t.name]), '', freeTeachers.length ? 'Select' : 'No teacher without a login'))}</select>
@@ -43,7 +43,7 @@ function userForm(u, teachers, users, after) {
       role?.addEventListener('change', () => d.querySelector('#u-teacher-f').classList.toggle('hidden', role.value !== 'teacher'));
       onSubmit(form, async v => {
         if (editing) {
-          const body = { name: v.name };
+          const body = { name: v.name, email: v.email };
           if (v.password) body.password = v.password;
           if (v.active !== undefined) body.active = v.active;
           await api('PATCH', `/api/users/${u.id}`, body);

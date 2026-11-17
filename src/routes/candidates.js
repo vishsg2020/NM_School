@@ -273,6 +273,14 @@ module.exports = (app, { db }) => {
           @parent_relationship, @phone, @phone_norm, @student_phone, @location, @age, @sales_rep_id, @pretest_at,
           @time_confirmation, @pretest_teacher_id, @status, @notes, @key, @by) RETURNING id`, { ...c, key, by: req.user.id });
         await audit(t, req.user, 'candidate', r.id, 'created', null, c);
+        // Started from a call lead ("Pre Test Booked"): link the lead so its call history stays with the candidate.
+        if (b.call_lead_id) {
+          const lead = await t.get('SELECT id, assigned_rep_id, candidate_id FROM leads WHERE id = ? FOR UPDATE', [idParam(b.call_lead_id)]);
+          if (!lead || (req.user.role !== 'manager' && lead.assigned_rep_id && lead.assigned_rep_id !== req.user.id)) throw notFound('Lead');
+          if (lead.candidate_id) throw conflict('This lead already has a pre-test candidate');
+          await t.run('UPDATE leads SET candidate_id = ?, updated_at = now_iso() WHERE id = ?', [r.id, lead.id]);
+          await audit(t, req.user, 'lead', lead.id, 'candidate_added', null, { candidate_id: r.id, lead_id: c.lead_id });
+        }
         return r.id;
       });
     } catch (e) {

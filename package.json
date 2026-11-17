@@ -8,7 +8,8 @@
     "test": "node --test test/*.test.js",
     "seed:demo": "node scripts/seed-demo.js ./data/demo-pg",
     "backup": "node scripts/backup.js",
-    "migrate": "node scripts/migrate.js"
+    "migrate": "node scripts/migrate.js",
+    "import:calls": "node scripts/import-calls.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

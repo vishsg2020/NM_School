@@ -49,6 +49,9 @@ module.exports = (app, { db }) => {
         students_pending_payments: `SELECT COUNT(DISTINCT e.student_id) n FROM payments p JOIN enrollments e ON e.id = p.enrollment_id WHERE p.status='Pending'`,
         overdue_students: `SELECT COUNT(DISTINCT e.student_id) n FROM payments p JOIN enrollments e ON e.id = p.enrollment_id WHERE p.status='Pending' AND p.date < @t`,
         fees_to_chase: `SELECT COUNT(*) n FROM payments WHERE status='Pending' AND date <= @soon`,
+        calls_due: `SELECT COUNT(*) n FROM leads l LEFT JOIN LATERAL (SELECT response, callback_at FROM lead_calls WHERE lead_id = l.id ORDER BY called_at DESC, id DESC LIMIT 1) lc ON true
+          WHERE lc.response = 'Call Later' AND (lc.callback_at IS NULL OR substr(lc.callback_at,1,10) <= @t)
+          AND NOT EXISTS (SELECT 1 FROM students s JOIN enrollments e ON e.student_id = s.id WHERE s.candidate_id = l.candidate_id)`,
         fees_to_chase_amount: `SELECT COALESCE(SUM(amount),0) n FROM payments WHERE status='Pending' AND date <= @soon`,
       }, { month, t, soon: new Date(Date.parse(t + 'T00:00:00Z') + 7 * 864e5).toISOString().slice(0, 10) });
       const upcoming_pretests = (await db.all(`SELECT c.id, c.lead_id, c.student_name, c.pretest_at, c.status, c.time_confirmation, t.name teacher_name

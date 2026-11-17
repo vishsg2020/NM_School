@@ -148,17 +148,19 @@ const RELATIONSHIPS = ['Mother', 'Father', 'Guardian', 'Other'];
 const ADULT_AGE = 18;
 
 /** Add or edit a candidate. */
-export function candidateForm(c, after) {
+/** Add or edit a candidate. A new candidate can start from a call lead ({ prefill, callLead }). */
+export function candidateForm(c, after, { prefill = null, callLead = null } = {}) {
+  const src = c ?? prefill;
   const isMgr = can('manager');
   const editing = !!c;
   const key = uid();
-  const date = c?.pretest_at ? c.pretest_at.slice(0, 10) : '';
-  const time = c?.pretest_at ? c.pretest_at.slice(11, 16) : '';
+  const date = src?.pretest_at ? c.pretest_at.slice(0, 10) : '';
+  const time = src?.pretest_at ? c.pretest_at.slice(11, 16) : '';
   const statusList = isMgr ? STATUSES : (editing && ['Completed', 'Needs Review'].includes(c.status) ? [c.status] : SALES_STATUSES);
-  const repDefault = c?.sales_rep_id ?? (can('sales') ? state.me.id : '');
-  const minor0 = c?.age != null && c.age < ADULT_AGE;
-  const teacherLocked = !!c?.result_id;
-  const teacherField = isMgr ? `<div class="field"><label for="c-teacher">Pre-test teacher</label><select id="c-teacher" name="pretest_teacher_id" ${teacherLocked ? 'disabled' : ''}>${teacherOptions(c?.pretest_teacher_id ?? '', { blank: 'Not assigned yet' })}</select>${teacherLocked ? '<div class="hint">Locked: the assessment is recorded.</div>' : ''}</div>` : '';
+  const repDefault = src?.sales_rep_id ?? (can('sales') ? state.me.id : '');
+  const minor0 = src?.age != null && src.age < ADULT_AGE;
+  const teacherLocked = !!src?.result_id;
+  const teacherField = isMgr ? `<div class="field"><label for="c-teacher">Pre-test teacher</label><select id="c-teacher" name="pretest_teacher_id" ${teacherLocked ? 'disabled' : ''}>${teacherOptions(src?.pretest_teacher_id ?? '', { blank: 'Not assigned yet' })}</select>${teacherLocked ? '<div class="hint">Locked: the assessment is recorded.</div>' : ''}</div>` : '';
 
   // Timing: a new candidate picks Confirmed / Not confirmed; editing keeps the full set of fields.
   const timing = editing ? html`
@@ -194,23 +196,23 @@ export function candidateForm(c, after) {
     body: html`<form id="cand-form" novalidate>
       <fieldset><legend>Student</legend>
         <div class="grid2">
-          <div class="field"><label for="c-first">First name *</label><input id="c-first" name="first_name" required maxlength="60" autocomplete="off" value="${c?.first_name ?? c?.student_name}"></div>
-          <div class="field"><label for="c-last">Last name *</label><input id="c-last" name="last_name" required maxlength="60" autocomplete="off" value="${c?.last_name}"></div>
+          <div class="field"><label for="c-first">First name *</label><input id="c-first" name="first_name" required maxlength="60" autocomplete="off" value="${src?.first_name ?? src?.student_name}"></div>
+          <div class="field"><label for="c-last">Last name *</label><input id="c-last" name="last_name" required maxlength="60" autocomplete="off" value="${src?.last_name}"></div>
         </div>
         <div class="grid3">
-          <div class="field"><label for="c-age">Age *</label><input id="c-age" name="age" type="number" min="2" max="99" inputmode="numeric" required value="${c?.age}"></div>
-          <div class="field"><label for="c-gender">Gender</label><select id="c-gender" name="gender">${raw(options(GENDERS, c?.gender, 'Select'))}</select></div>
-          <div class="field"><label for="c-loc">Location</label><input id="c-loc" name="location" maxlength="100" value="${c?.location}"></div>
+          <div class="field"><label for="c-age">Age *</label><input id="c-age" name="age" type="number" min="2" max="99" inputmode="numeric" required value="${src?.age}"></div>
+          <div class="field"><label for="c-gender">Gender</label><select id="c-gender" name="gender">${raw(options(GENDERS, src?.gender, 'Select'))}</select></div>
+          <div class="field"><label for="c-loc">Location</label><input id="c-loc" name="location" maxlength="100" value="${src?.location}"></div>
         </div>
-        <div class="field" id="adult-phone"><label for="c-phone">Phone *</label><input id="c-phone" name="phone" type="tel" maxlength="30" value="${minor0 ? '' : c?.phone}" placeholder="+91 98470 00000">
+        <div class="field" id="adult-phone"><label for="c-phone">Phone *</label><input id="c-phone" name="phone" type="tel" maxlength="30" value="${minor0 ? '' : src?.phone}" placeholder="+91 98470 00000">
           <div class="hint">Required for students aged 18 and over.</div></div>
       </fieldset>
       <fieldset id="minor"><legend>Parent / guardian</legend>
         <div class="grid2">
-          <div class="field"><label for="c-parent">Parent name *</label><input id="c-parent" name="parent_name" maxlength="100" value="${c?.parent_name}"></div>
-          <div class="field"><label for="c-rel">Relationship *</label><select id="c-rel" name="parent_relationship">${raw(options(RELATIONSHIPS, c?.parent_relationship, 'Select'))}</select></div>
-          <div class="field"><label for="c-pphone">Parent phone *</label><input id="c-pphone" name="phone" type="tel" maxlength="30" value="${minor0 ? c?.phone : ''}" placeholder="+91 98470 00000"></div>
-          <div class="field"><label for="c-sphone">Student phone</label><input id="c-sphone" name="student_phone" type="tel" maxlength="30" value="${c?.student_phone}" placeholder="Optional for under 18"></div>
+          <div class="field"><label for="c-parent">Parent name *</label><input id="c-parent" name="parent_name" maxlength="100" value="${src?.parent_name}"></div>
+          <div class="field"><label for="c-rel">Relationship *</label><select id="c-rel" name="parent_relationship">${raw(options(RELATIONSHIPS, src?.parent_relationship, 'Select'))}</select></div>
+          <div class="field"><label for="c-pphone">Parent phone *</label><input id="c-pphone" name="phone" type="tel" maxlength="30" value="${minor0 ? src?.phone : ''}" placeholder="+91 98470 00000"></div>
+          <div class="field"><label for="c-sphone">Student phone</label><input id="c-sphone" name="student_phone" type="tel" maxlength="30" value="${src?.student_phone}" placeholder="Optional for under 18"></div>
         </div>
       </fieldset>
       <div class="grid2">
@@ -220,7 +222,7 @@ export function candidateForm(c, after) {
           <select id="c-rep" name="sales_rep_id" required>${raw(options(state.reps.filter(r => r.active || r.id === repDefault).map(r => [r.id, r.name]), repDefault, 'Select'))}</select></div>
       </div>
       ${raw(timing)}
-      <div class="field"><label for="c-notes">Notes</label><textarea id="c-notes" name="notes" maxlength="2000">${c?.notes}</textarea></div>
+      <div class="field"><label for="c-notes">Notes</label><textarea id="c-notes" name="notes" maxlength="2000">${src?.notes}</textarea></div>
       <div id="dup-box"></div>
     </form>`,
     foot: `<button class="btn" type="button" data-close>Cancel</button><button class="btn primary" type="submit" form="cand-form">${editing ? 'Save changes' : 'Add pre-test candidate'}</button>`,
@@ -295,7 +297,7 @@ export function candidateForm(c, after) {
           Object.assign(body, { pretest_at: '', time_confirmation: 'Not Confirmed' });
         }
         if (isMgr && v.pretest_teacher_id !== undefined) body.pretest_teacher_id = v.pretest_teacher_id || null;
-        if (!editing) { body.lead_id = v.lead_id; body.idempotency_key = key; }
+        if (!editing) { body.lead_id = v.lead_id; body.idempotency_key = key; if (callLead) body.call_lead_id = callLead; }
         try {
           const r = editing ? await api('PATCH', `/api/candidates/${c.id}`, body) : await api('POST', '/api/candidates', body);
           close();

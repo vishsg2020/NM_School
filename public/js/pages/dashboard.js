@@ -1,5 +1,6 @@
 import { get, esc, inr, fmtDT, fmtDate, fmtTime, fmtMonth, pill, state, table, html, raw, options, opt, teacherOptions, parseHash, setQuery, qs, addDays, stateBox } from '../core.js';
 import { columnChart, barList } from '../charts.js';
+import { callForm } from './calls.js';
 
 const metric = (label, value, href, tone = '') =>
   `<a class="metric ${tone}" href="${href}"><span class="metric-label">${esc(label)}</span><span class="metric-value">${esc(value)}</span></a>`;
@@ -28,6 +29,7 @@ export async function render(page) {
           metric('Scheduled', m.scheduled_pretests, '#/pretests?status=Scheduled'),
           metric('Time required', m.time_required_pretests, '#/pretests?status=Time%20Required', m.time_required_pretests ? 'attention' : ''),
           metric('No teacher assigned', m.unassigned_pretests, '#/pretests?teacher=unassigned', m.unassigned_pretests ? 'attention' : ''),
+          metric('Calls to make now (all reps)', m.calls_due ?? 0, '#/calls?tab=later&due=1', m.calls_due ? 'attention' : ''),
           metric('Results to review', m.unreviewed_results, '#/pretests?review=pending'),
           metric('Follow-ups due', m.followups_due, '#/pretests?followup=due', m.followups_due ? 'attention' : ''),
         ])}
@@ -58,9 +60,19 @@ export async function render(page) {
   }
 
   if (d.role === 'sales') {
+    // Calls: what to call now, and this month's target (worked out on the server for this rep only).
+    const [lc, cs] = await Promise.all([get('/api/leads?tab=later&due=1').catch(() => null), get('/api/calls/summary').catch(() => null)]);
+    const me = cs?.reps?.[0];
     page.innerHTML = head(fmtDate(today)) + `
-      <div class="page-head"><div class="actions"><a class="btn primary" href="#/pretests?new=1">Add candidate</a></div></div>
+      <div class="page-head"><div class="actions"><button class="btn primary" type="button" id="dash-call">Log a call</button><a class="btn" href="#/pretests?new=1">Add candidate</a></div></div>
       <div class="metric-groups">
+        ${lc ? group('My calls', [
+          metric('Call back now', lc.counts.later_due, '#/calls?tab=later&due=1', lc.counts.later_due ? 'attention' : ''),
+          metric('Reconnect', lc.counts.reconnect, '#/calls?tab=reconnect'),
+          metric('Interested, open', lc.counts.interested, '#/calls?tab=interested'),
+          ...(me ? [metric(`Calls in ${fmtMonth(d.month)}`, me.calls, '#/calls?tab=all')] : []),
+          ...(me && me.target_count != null ? [metric(`Target: ${me.admissions} of ${me.target_count} admissions`, me.target_status, '#/calls?tab=all', me.target_status === 'On track' ? '' : 'attention')] : []),
+        ]) : ''}
         ${group('My leads', [
           metric('Candidates I own', m.my_candidates, `#/pretests?sales_rep=${state.me.id}`),
           metric(`Added in ${fmtMonth(d.month)}`, m.my_added_month, `#/pretests?sales_rep=${state.me.id}`),
@@ -75,6 +87,7 @@ export async function render(page) {
         ])}
       </div>
       <section class="panel"><h2>Upcoming pre-tests</h2>${pretestTable(d.upcoming_pretests)}</section>`;
+    page.querySelector('#dash-call')?.addEventListener('click', () => callForm(null, () => render(page)));
     return;
   }
 

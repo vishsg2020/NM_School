@@ -405,7 +405,7 @@ function followCell(x) {
   return parts.join('');
 }
 /** The parent's WhatsApp number in international form (Indian 10-digit numbers get 91 in front). */
-function waNumber(phone) {
+export function waNumber(phone) {
   let d = String(phone || '').replace(/\D/g, '').replace(/^00/, '');
   if (d.length === 11 && d.startsWith('0')) d = d.slice(1);
   if (d.length === 10) d = '91' + d;

@@ -1115,3 +1115,121 @@ test('Round 4: fee reminders, missed classes and extra charges, teacher pay stat
   assert.equal((await M.get(`/api/enrollments/${e1.id}`)).data.status, 'Completed');
   assert.equal((await M.get(`/api/enrollments/${r.data.id}`)).data.status, 'Active');
 });
+
+test('Calls: tele team logs calls, queues, pre-test hand-off, visibility, summary and rep targets', async () => {
+  assert.equal((await T1.get('/api/call-options')).status, 403);
+  const opts = (await S.get('/api/call-options')).data;
+  assert.deepEqual(opts.categories, ['NM', 'KVS', 'Online Course', 'Other']);
+  assert.ok(opts.responses.includes('Interested – Price Issue'));
+  // A second Sales Team member
+  assert.equal((await M.post('/api/users', { name: 'Megha', email: 'megha@x.in', password: pw, role: 'sales' })).status, 201);
+  const S2 = client(); await S2.login('megha@x.in');
+
+  // New number, Call Later needs a date
+  let r = await S.post('/api/calls', { phone: '+91 98470 11111', name: 'Anitha', category: 'Online Course', response: 'Call Later' });
+  assert.equal(r.status, 400); assert.match(r.data.error, /Call back/);
+  assert.equal((await S.post('/api/calls', { phone: '+91 98470 11111', response: 'Connected' })).status, 400); // category for a new lead
+  const key = 'call-' + Date.now();
+  r = await S.post('/api/calls', { phone: '+91 98470 11111', name: 'Anitha', location: 'Dubai', age: 8, gender: 'Female', category: 'Online Course',
+    response: 'Call Later', callback_date: '2026-10-14', callback_time: '18:30', notes: 'Busy, call evening', idempotency_key: key });
+  assert.equal(r.status, 201, JSON.stringify(r.data));
+  const lead = r.data;
+  assert.match(lead.lead_code, /^LD-\d{5}$/); assert.equal(lead.assigned_rep_id, salesId); assert.equal(lead.status, 'Open');
+  assert.equal(lead.last_response, 'Call Later'); assert.equal(lead.callback_at, '2026-10-14T18:30'); assert.equal(lead.calls, 1);
+  assert.equal((await S.post('/api/calls', { phone: '+91 98470 11111', name: 'Anitha', category: 'Online Course', response: 'Call Later', callback_date: '2026-10-14', idempotency_key: key })).data.id, lead.id);
+  assert.equal((await S.get(`/api/leads/${lead.id}`)).data.calls.length, 1, 'repeat click saves one call');
+  // The same number written differently finds the lead
+  assert.equal((await S.get('/api/leads/lookup?phone=09847011111')).data.lead.id, lead.id);
+  assert.equal((await S.get('/api/leads/lookup?phone=9847011111')).data.lead.id, lead.id);
+  // Queues
+  let list = (await S.get('/api/leads?tab=later')).data;
+  assert.ok(list.rows.some(x => x.id === lead.id)); assert.ok(list.counts.later_due >= 1);
+  // Another rep cannot see or call it
+  assert.equal((await S2.get('/api/leads/lookup?phone=+919847011111')).data.lead, null);
+  assert.equal((await S2.get('/api/leads/lookup?phone=+919847011111')).data.other_rep, 'Sam Sales');
+  assert.equal((await S2.get(`/api/leads/${lead.id}`)).status, 404);
+  assert.equal((await S2.post('/api/calls', { phone: '9847011111', response: 'Connected' })).status, 409);
+  assert.ok(!(await S2.get('/api/leads?tab=all')).data.rows.some(x => x.id === lead.id));
+  // Second call: Not Available → Reconnect; Interested → Interested; Not Interested closes; a later call reopens
+  r = await S.post('/api/calls', { lead_id: lead.id, response: 'Not Available' });
+  assert.equal(r.status, 201); assert.equal(r.data.calls, 2);
+  assert.ok((await S.get('/api/leads?tab=reconnect')).data.rows.some(x => x.id === lead.id));
+  assert.ok(!(await S.get('/api/leads?tab=later')).data.rows.some(x => x.id === lead.id));
+  await S.post('/api/calls', { lead_id: lead.id, response: 'Interested – Price Issue', notes: 'Asked for discount' });
+  assert.ok((await S.get('/api/leads?tab=interested')).data.rows.some(x => x.id === lead.id));
+  r = await S.post('/api/calls', { lead_id: lead.id, response: 'Not Interested' });
+  assert.equal(r.data.status, 'Closed Lost');
+  assert.ok(!(await S.get('/api/leads?tab=interested')).data.rows.some(x => x.id === lead.id));
+  assert.equal((await S.get('/api/leads?tab=all&status=Closed%20Lost')).data.rows.filter(x => x.id === lead.id).length, 1);
+  // Unassigned lead (Manager) is taken by the rep who calls it
+  r = await M.post('/api/calls', { phone: '+91 90000 22222', name: 'Joy', category: 'NM', response: 'Connected' });
+  assert.equal(r.status, 201); assert.equal(r.data.assigned_rep_id, null);
+  const un = r.data;
+  assert.ok((await S2.get('/api/leads?tab=all')).data.rows.some(x => x.id === un.id), 'unassigned leads are visible to all reps');
+  r = await S2.post('/api/calls', { lead_id: un.id, response: 'Pre Test Booked', notes: 'Saturday 4 PM' });
+  assert.equal(r.data.assigned_rep_id, (await M.get('/api/users')).data.find(u => u.email === 'megha@x.in').id);
+  assert.equal((await S.get(`/api/leads/${un.id}`)).status, 404, 'now Megha’s lead');
+  // Reassign: Manager only
+  assert.equal((await S2.patch(`/api/leads/${un.id}`, { assigned_rep_id: salesId })).status, 403);
+  // Pre-test hand-off: the candidate is linked to the lead; admission makes the lead Closed Won
+  r = await S2.post('/api/candidates', { first_name: 'Joy', last_name: 'Thomas', age: 30, phone: '+91 90000 22222', call_lead_id: un.id, idempotency_key: 'cl-' + Date.now() });
+  assert.equal(r.status, 201, JSON.stringify(r.data));
+  const cand = r.data;
+  let ld = (await S2.get(`/api/leads/${un.id}`)).data;
+  assert.equal(ld.candidate_id, cand.id); assert.equal(ld.candidate_code, cand.lead_id);
+  assert.ok((await S2.get('/api/leads?tab=pretest')).data.rows.some(x => x.id === un.id));
+  assert.equal((await S2.post('/api/candidates', { first_name: 'Joy', last_name: 'T', age: 30, phone: '+91 90000 22223', call_lead_id: un.id, idempotency_key: 'cl2-' + Date.now() })).status, 409);
+  await M.patch(`/api/candidates/${cand.id}`, { pretest_teacher_id: teacherA });
+  await M.put(`/api/candidates/${cand.id}/result`, { recommended_course: 'Starter', assessment: 'ok', admission_status: 'Confirmed' });
+  const sid = (await M.get(`/api/candidates/${cand.id}`)).data.student_id;
+  r = await M.post('/api/admissions', { student_id: sid, course: 'Starter', class_mode: '1:1', slot_days: [2], slot_time: '20:00', total_classes: 4, teacher_id: teacherA,
+    start_date: '2026-10-20', total_fee: 1000, advance: { amount: 500, status: 'Paid', date: '2026-10-15', method: 'UPI' }, final: { amount: 500, status: 'Pending', date: '2026-11-15' } });
+  assert.equal(r.status, 201, JSON.stringify(r.data));
+  ld = (await M.get(`/api/leads/${un.id}`)).data;
+  assert.equal(ld.status, 'Closed Won'); assert.equal(ld.student_id, sid);
+  assert.ok(!(await M.get('/api/leads?tab=later')).data.rows.some(x => x.id === un.id));
+  // Manager reassigns
+  r = await M.patch(`/api/leads/${lead.id}`, { assigned_rep_id: (await M.get('/api/users')).data.find(u => u.email === 'megha@x.in').id, reason: 'Rasika on leave' });
+  assert.equal(r.status, 200); assert.equal(r.data.rep_name, 'Megha');
+  assert.equal((await S2.get(`/api/leads/${lead.id}`)).status, 200);
+
+  // Monthly summary: numbers equal the lists
+  const month = (await M.get(`/api/leads/${lead.id}`)).data.calls[0].called_at; // UTC; IST month below
+  const m = new Date(Date.parse(month) + 330 * 60000).toISOString().slice(0, 7);
+  const sum = (await M.get(`/api/calls/summary?month=${m}`)).data;
+  const created = (await M.get(`/api/leads?tab=all&created_month=${m}`)).data.rows.length;
+  assert.equal(sum.totals.new_leads, created);
+  assert.equal(sum.totals.calls, sum.reps.reduce((s, x) => s + x.calls, 0));
+  assert.equal(sum.reps.find(x => x.id === salesId).calls, 4);
+  const mEnd = new Date(Date.UTC(+m.slice(0, 4), +m.slice(5, 7), 0)).toISOString().slice(0, 10);
+  const adm = (await M.get(`/api/dashboard/trends?date_from=${m}-01&date_to=${mEnd}`)).data.totals.admissions;
+  assert.equal(sum.totals.admissions, adm, 'admissions match the dashboard');
+  assert.equal(sum.byCategory.reduce((s, x) => s + x.n, 0), sum.totals.new_leads);
+  // Sales see only their own row
+  const own = (await S.get(`/api/calls/summary?month=${m}`)).data;
+  assert.equal(own.reps.length, 1); assert.equal(own.reps[0].id, salesId); assert.equal(own.totals, undefined);
+
+  // Rep targets
+  assert.equal((await S.put('/api/targets', { month: '2026-10', user_id: salesId, target_count: 20 })).status, 403);
+  assert.equal((await M.put('/api/targets', { month: '2026-10', user_id: salesId, target_count: 20, min_conversion: 150 })).status, 400);
+  r = await M.put('/api/targets', { month: '2026-10', user_id: salesId, target_count: 2, min_conversion: 0, notes: 'Focus on Online Course' });
+  assert.equal(r.status, 200);
+  let row = r.data.reps.find(x => x.id === salesId);
+  const admOct = (await M.get('/api/reports?month=2026-10')).data.by_sales_rep.find(x => x.id === salesId)?.admissions || 0;
+  assert.equal(row.admissions, admOct, 'actual admissions equal the Reports page');
+  assert.equal(row.target_status, admOct >= 2 ? 'On track' : 'Behind on count');
+  r = await M.post('/api/targets/copy', { month: '2026-11' });
+  assert.equal(r.data.copied, 1); assert.equal(r.data.reps.find(x => x.id === salesId).target_count, 2);
+  assert.equal((await M.post('/api/targets/copy', { month: '2026-11' })).data.copied, 0, 'copying twice adds nothing');
+
+  // Options in Settings: the four special responses are always kept
+  r = await M.put('/api/settings/call-options', { categories: 'NM\nKVS\nOnline Course\nOther\nSchool visit', responses: 'Connected\nInterested' });
+  assert.equal(r.status, 200); assert.ok(r.data.categories.includes('School visit'));
+  for (const sp of ['Not Available', 'Call Later', 'Pre Test Booked', 'Not Interested']) assert.ok(r.data.responses.includes(sp));
+  assert.equal((await S.put('/api/settings/call-options', { categories: 'x', responses: 'y' })).status, 403);
+  // A rep added by the import (inactive, no real email) can be given a login by the Manager
+  const meghaId = (await M.get('/api/users')).data.find(u => u.email === 'megha@x.in').id;
+  assert.equal((await M.patch(`/api/users/${meghaId}`, { email: 'm@x.in' })).status, 409);
+  r = await M.patch(`/api/users/${meghaId}`, { email: 'megha.n@x.in', password: 'another-pass-1' });
+  assert.equal(r.status, 200); assert.equal(r.data.email, 'megha.n@x.in');
+});

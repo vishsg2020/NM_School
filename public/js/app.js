@@ -9,6 +9,7 @@ import * as reports from './pages/reports.js';
 import * as users from './pages/users.js';
 import * as settings from './pages/settings.js';
 import * as pay from './pages/pay.js';
+import * as calls from './pages/calls.js';
 import { openNotifications, refreshBell } from './pages/notifications.js';
 
 const app = document.getElementById('app');
@@ -17,6 +18,7 @@ const NAV = [
   { group: null, items: [{ path: 'dashboard', label: 'Dashboard', roles: ['manager', 'sales', 'teacher'] }] },
   { group: 'Pre-tests', items: [
     { path: 'pretests', label: 'Pre-Test Queue', roles: ['manager', 'sales', 'teacher'] },
+    { path: 'calls', label: 'Calls', roles: ['manager', 'sales'] },
   ] },
   { group: 'Students', items: [
     { path: 'admissions', label: 'Admissions', roles: ['manager'], badge: 'awaiting_setup' },
@@ -51,6 +53,8 @@ const ROUTES = {
   users: users.render,
   settings: settings.render,
   pay: pay.render,
+  calls: calls.render,
+  lead: calls.renderLead,
   account: users.renderAccount,
 };
 
