@@ -1,6 +1,7 @@
 import {
   state, api, get, esc, html, raw, pill, fmtDT, fmtStamp, fmtTime, table, drawer, onSubmit, options, opt, teacherOptions,
   setQuery, can, toast, uid, go, ApiError, stateBox, copyText, todayLocal, fmtDate, confirmBox,
+  linkedFilters, wireLinked, clearLinked,
 } from '../core.js';
 import { openAdmission } from './admissions.js';
 
@@ -18,6 +19,7 @@ const FILTER_KEYS = ['q', 'date', 'teacher', 'status', 'confirmation', 'sales_re
 export async function renderQueue(page, { query }) {
   const f = Object.fromEntries(FILTER_KEYS.map(k => [k, query[k] || '']));
   const isTeacher = can('teacher');
+  const linked = linkedFilters(query, ['result', 'result_from', 'result_to']);
   page.innerHTML = html`
     <div class="page-head"><div><h1>Pre-Test Queue</h1>
       <div class="sub">${isTeacher ? 'Pre-tests assigned to you.' : 'Every candidate from first contact to assessment.'}</div></div>
@@ -30,9 +32,10 @@ export async function renderQueue(page, { query }) {
       <div class="field"><label for="f-status">Status</label><select id="f-status" name="status">${raw(options(STATUSES, f.status, 'All statuses'))}</select></div>
       <div class="field"><label for="f-conf">Time confirmation</label><select id="f-conf" name="confirmation">${raw(options(CONFIRM, f.confirmation, 'Any'))}</select></div>
       ${raw(isTeacher ? '' : `<div class="field"><label for="f-rep">Sales rep</label><select id="f-rep" name="sales_rep">${options(state.reps.map(r => [r.id, r.name]), f.sales_rep, 'All reps')}</select></div>`)}
-      <input type="hidden" name="result" value="${f.result}"><input type="hidden" name="review" value="${f.review}"><input type="hidden" name="followup" value="${f.followup}">
+      ${raw(linked.hidden)}<input type="hidden" name="review" value="${f.review}"><input type="hidden" name="followup" value="${f.followup}">
       <button class="btn" type="button" id="clear">Clear filters</button>
     </form>
+    ${raw(linked.note)}
     ${raw(f.followup === 'due' ? '<p class="notice info">Showing follow-ups that are due today or overdue. Clear filters to see everyone.</p>' : '')}
     <p class="result-count" id="count" aria-live="polite"></p>
     <div id="list">${raw(stateBox('loading'))}</div>`;
@@ -72,7 +75,9 @@ export async function renderQueue(page, { query }) {
   let t;
   form.addEventListener('input', e => { clearTimeout(t); t = setTimeout(load, e.target.type === 'search' ? 250 : 0); });
   form.addEventListener('submit', e => { e.preventDefault(); load(); });
+  wireLinked(page, load);
   page.querySelector('#clear').addEventListener('click', () => {
+    clearLinked(page);
     form.querySelectorAll('input, select').forEach(el => { el.value = ''; });
     f.date = ''; page.querySelector('.notice.info')?.remove();
     load();

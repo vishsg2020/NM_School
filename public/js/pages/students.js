@@ -1,4 +1,4 @@
-import { api, get, esc, html, raw, pill, inr, fmtDate, fmtDT, fmtTime, table, can, setQuery, options, stateBox, todayLocal, drawer, onSubmit, toast, starsText, feedbackUrl, copyText, fmtStamp } from '../core.js';
+import { api, get, esc, html, raw, pill, inr, fmtDate, fmtDT, fmtTime, table, can, setQuery, options, stateBox, todayLocal, drawer, onSubmit, toast, starsText, feedbackUrl, copyText, fmtStamp, linkedFilters, wireLinked, clearLinked } from '../core.js';
 import { paymentForm, feePlanForm, enrollmentForm } from './admissions.js';
 import { scheduleForm } from './classes.js';
 import { historyList, shrinkImage, guessType, toBase64 } from './pretests.js';
@@ -9,15 +9,17 @@ export const slotText = e => (e.slot_days ? `${e.slot_days.split(',').map(d => D
 export async function renderList(page, { query }) {
   let savedSort = null; try { savedSort = localStorage.getItem('nm.students.sort'); } catch { /* private mode */ }
   const f = { q: query.q || '', status: query.status || '', admitted: query.admitted || '', sort: query.sort || savedSort || 'newest' };
+  const linked = linkedFilters(query, can('manager') ? ['admitted_from', 'admitted_to', 'teacher', 'sales_rep', 'format'] : []);
   page.innerHTML = html`<div class="page-head"><div><h1>Students</h1>
     <div class="sub">${can('teacher') ? 'Students you teach.' : 'Every child with a Confirmed pre-test.'}</div></div></div>
     <form class="filters" id="sf" role="search" aria-label="Filter students">
       <div class="field grow"><label for="s-q">Search</label><input id="s-q" name="q" type="search" value="${f.q}" placeholder="Student, parent, Lead ID, Student ID"></div>
-      ${raw(can('manager') ? `<div class="field"><label for="s-st">Enrollment</label><select id="s-st" name="status">${options([['active', 'Active enrollment'], ['awaiting', 'Awaiting admission setup']], f.status, 'All')}</select></div>` : '')}
+      ${raw(can('manager') ? `<div class="field"><label for="s-st">Enrollment</label><select id="s-st" name="status">${options([['active', 'Active enrollment'], ['enrolled', 'Admitted (any enrollment)'], ['awaiting', 'Awaiting admission setup']], f.status, 'All')}</select></div>` : '')}
       <div class="field"><label for="s-sort">Sort by</label><select id="s-sort" name="sort">${raw(options([['newest', 'Newest admission first'], ['oldest', 'Oldest first'], ['name', 'Name A–Z'], ['remaining', 'Fewest classes remaining'], ['end_date', 'End date (soonest)'], ['teacher', 'Teacher']], f.sort))}</select></div>
-      <input type="hidden" name="admitted" value="${f.admitted}">
+      <input type="hidden" name="admitted" value="${f.admitted}">${raw(linked.hidden)}
       <button class="btn" type="button" id="s-clear">Clear filters</button>
     </form>
+    ${raw(linked.note)}
     ${raw(f.admitted ? `<p class="notice info">Showing students admitted in ${esc(f.admitted)}.</p>` : '')}
     <p class="result-count" id="s-count" aria-live="polite"></p>
     <div id="s-list">${raw(stateBox('loading'))}</div>`;
@@ -45,7 +47,8 @@ export async function renderList(page, { query }) {
   let t;
   form.addEventListener('input', e => { clearTimeout(t); t = setTimeout(load, e.target.type === 'search' ? 250 : 0); });
   form.addEventListener('submit', e => { e.preventDefault(); load(); });
-  page.querySelector('#s-clear').addEventListener('click', () => { form.querySelectorAll('input,select:not(#s-sort)').forEach(x => { x.value = ''; }); page.querySelector('.notice.info')?.remove(); load(); });
+  wireLinked(page, load);
+  page.querySelector('#s-clear').addEventListener('click', () => { clearLinked(page); form.querySelectorAll('input,select:not(#s-sort)').forEach(x => { x.value = ''; }); page.querySelector('.notice.info')?.remove(); load(); });
   await load();
 }
 

@@ -56,6 +56,7 @@ function createApp(db) {
   require('./routes/admissions')(app, ctx);
   require('./routes/classes')(app, ctx);
   require('./routes/reports')(app, ctx);
+  require('./routes/trends')(app, ctx);
   require('./routes/settings')(app, ctx);
   require('./routes/notifications')(app, ctx);
   require('./routes/feedback')(app, ctx);

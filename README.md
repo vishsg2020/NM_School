@@ -158,6 +158,22 @@ Reports → **Download Excel** saves the month as `Nalla-Malayalam-report-YYYY-M
 Fees collected, Outstanding, Classes, Teachers, Sales reps, Feedback) to keep as a record. **Print / save as PDF** prints
 the on-screen report.
 
+## Dashboard charts (Manager)
+
+Below the dashboard figures, **Trends** shows fees collected, new admissions, classes completed and pending fees for a
+period (This month, Last month, Last 3 months, Last 12 months — the default —, All time or Custom dates), filtered by
+teacher, sales rep and class format (1:1 / 3:1), with charts of fees by day/week/month, admissions by month, fees by
+sales rep, classes by teacher, pre-tests by result and pending/overdue fees. Clicking a bar or figure opens the matching
+list already filtered ("Also filtered by … · Clear").
+
+- Every figure is worked out from the records on each request (`GET /api/dashboard/trends`, Manager only); nothing is stored.
+- Fees use the date received (Paid payments); pending and overdue are everything still open, whatever the period.
+- Fees and admissions belong to the student's regular teacher and the sales rep on the admission; classes to the
+  teacher who took the class; pre-tests to the pre-test teacher, dated by the day the result was entered (IST).
+- Classes count **sessions**: a 3:1 group counts once (Class Activity lists one row per student).
+- Charts are plain SVG drawn by `public/js/charts.js` (no library, no inline styles, so the strict CSP stays).
+- The acceptance tests check the chart totals against the Payments, Students, Class Activity and Pre-Test lists.
+
 ## Parent feedback
 
 - **After a class:** when a class is marked Completed, the teacher or Manager can copy a WhatsApp-ready message with a

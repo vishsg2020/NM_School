@@ -312,6 +312,8 @@ module.exports = (app, { db }) => {
     if (q.date_from && isValidDate(q.date_from)) { where.push('p.date >= @df'); p.df = q.date_from; }
     if (q.date_to && isValidDate(q.date_to)) { where.push('p.date <= @dt'); p.dt = q.date_to; }
     if (q.sales_rep) { where.push('e.sales_rep_id = @rep'); p.rep = idParam(q.sales_rep); }
+    if (q.teacher) { where.push('e.teacher_id = @tid'); p.tid = idParam(q.teacher); }
+    if (q.format === '1:1' || q.format === '3:1') { where.push('e.class_mode = @fmt'); p.fmt = q.format; }
     if (q.q) { where.push('(c.student_name ILIKE @q OR c.lead_id ILIKE @q OR p.reference ILIKE @q)'); p.q = `%${q.q}%`; }
     const rows = await db.all(`
       SELECT p.*, e.student_id, e.course, e.total_fee, e.lead_id, c.student_name, c.parent_name, c.phone,
@@ -371,8 +373,17 @@ module.exports = (app, { db }) => {
     if (req.user.role === 'teacher') { where.push('EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND x.teacher_id = @me)'); p.me = req.user.teacher_id; }
     if (q.q) { where.push('(c.student_name ILIKE @q OR c.parent_name ILIKE @q OR c.lead_id ILIKE @q OR s.student_code ILIKE @q)'); p.q = `%${q.q}%`; }
     if (q.status === 'awaiting') where.push('NOT EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id)');
+    if (q.status === 'enrolled') where.push('EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id)');
     if (q.admitted && /^\d{4}-\d{2}$/.test(q.admitted)) { where.push('EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND substr(x.admission_date,1,7) = @adm)'); p.adm = q.admitted; }
     if (q.status === 'active') where.push(`EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND x.status='Active')`);
+    // Links from the dashboard charts: students with an admission in these dates / for this teacher, rep or format.
+    const ex = [];
+    if (q.admitted_from && isValidDate(q.admitted_from)) { ex.push('x.admission_date >= @af'); p.af = q.admitted_from; }
+    if (q.admitted_to && isValidDate(q.admitted_to)) { ex.push('x.admission_date <= @at'); p.at = q.admitted_to; }
+    if (q.teacher && req.user.role === 'manager') { ex.push('x.teacher_id = @xt'); p.xt = idParam(q.teacher); }
+    if (q.sales_rep && req.user.role === 'manager') { ex.push('x.sales_rep_id = @xr'); p.xr = idParam(q.sales_rep); }
+    if (q.format === '1:1' || q.format === '3:1') { ex.push('x.class_mode = @xf'); p.xf = q.format; }
+    if (ex.length) where.push(`EXISTS (SELECT 1 FROM enrollments x WHERE x.student_id = s.id AND ${ex.join(' AND ')})`);
     const rows = await db.all(`
       SELECT s.id, s.student_code, s.created_at, c.id AS candidate_id, c.lead_id, c.student_name, c.parent_name, c.age, c.location,
              ${req.user.role === 'manager' ? 'c.phone,' : ''} r.name AS sales_rep_name,

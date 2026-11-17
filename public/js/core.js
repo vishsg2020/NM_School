@@ -251,3 +251,37 @@ export const starsText = n => (n ? `<span class="stars-ro" aria-label="${n} of 5
 
 /** Copies a feedback link and the WhatsApp-ready message. */
 export function feedbackUrl(token) { return `${location.origin}/f/${token}`; }
+
+// ---------- Filters a list was opened with from a dashboard chart ----------
+// They have no field of their own on the list, so they ride along as hidden inputs (kept in the address)
+// and are shown on one line with a Clear button.
+const LINKED_DATES = { admitted: 'Admitted', result: 'Result entered' };
+export function linkedFilters(query, keys) {
+  const on = keys.filter(k => query[k]);
+  const name = (list, id) => (list.find(x => String(x.id) === String(id)) || {}).name || `#${id}`;
+  const parts = []; const done = new Set();
+  for (const k of on) {
+    if (done.has(k)) continue;
+    const m = k.match(/^(\w+)_(from|to)$/);
+    if (m && LINKED_DATES[m[1]]) {
+      const a = query[`${m[1]}_from`]; const b = query[`${m[1]}_to`]; done.add(`${m[1]}_from`); done.add(`${m[1]}_to`);
+      parts.push(`${LINKED_DATES[m[1]]} ${a ? fmtDate(a).slice(4) : 'any time'} – ${b ? fmtDate(b).slice(4) : 'today'}`);
+    } else if (k === 'teacher') parts.push('Teacher: ' + name(state.teachers, query[k]));
+    else if (k === 'sales_rep') parts.push('Sales rep: ' + name(state.reps, query[k]));
+    else if (k === 'format') parts.push('Format: ' + query[k]);
+    else if (k === 'result') parts.push(query[k] === 'none' ? 'No result yet' : 'Result: ' + query[k]);
+    else parts.push(`${k}: ${query[k]}`);
+  }
+  return {
+    hidden: on.map(k => `<input type="hidden" name="${esc(k)}" value="${esc(query[k])}" data-linked>`).join(''),
+    note: parts.length ? `<p class="notice info linked-note">Also filtered by <b>${esc(parts.join(' · '))}</b> · <button type="button" class="linkbtn" data-clear-linked>Clear</button></p>` : '',
+  };
+}
+/** Wires the note's Clear button; call `clearLinked(page)` from the list's own "Clear filters" too. */
+export function wireLinked(page, reload) {
+  page.querySelector('[data-clear-linked]')?.addEventListener('click', () => { clearLinked(page); reload(); });
+}
+export function clearLinked(page) {
+  page.querySelectorAll('[data-linked]').forEach(i => i.remove());
+  page.querySelector('.linked-note')?.remove();
+}

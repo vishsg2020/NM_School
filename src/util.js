@@ -108,6 +108,9 @@ function isValidAadhaar(n) {
   return c === 0;
 }
 
+/** SQL for the IST calendar day of a stored UTC timestamp (text like 2026-11-17T19:00:00.000Z). India has no DST. */
+const istDay = col => `to_char((${col})::timestamp + interval '330 minutes', 'YYYY-MM-DD')`;
+
 function inr(n) {
   return '₹' + Number(n || 0).toLocaleString('en-IN');
 }
@@ -115,5 +118,5 @@ function inr(n) {
 module.exports = {
   HttpError, bad, notFound, forbidden, conflict, unprocessable,
   TZ, nowParts, today, thisMonth, isValidDate, isValidDateTime, isValidTime, weekdayOf,
-  addMinutes, minutesOf, str, int, oneOf, bool, idParam, normPhone, normName, inr, projectDates, isValidAadhaar,
+  addMinutes, minutesOf, str, int, oneOf, bool, idParam, normPhone, normName, inr, istDay, projectDates, isValidAadhaar,
 };

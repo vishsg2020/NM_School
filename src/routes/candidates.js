@@ -6,7 +6,7 @@ const google = require('../google');
 const { notify, fmtWhen } = require('../notify');
 const {
   bad, notFound, forbidden, conflict, str, int, oneOf, bool, isValidDateTime, isValidDate, normPhone, normName, idParam,
-  addMinutes, weekdayOf, today, isValidTime,
+  addMinutes, weekdayOf, today, isValidTime, istDay,
 } = require('../util');
 
 const STATUSES = ['Scheduled', 'Time Required', 'Needs Review', 'Completed', 'Cancelled', 'Follow-up'];
@@ -193,6 +193,9 @@ module.exports = (app, { db }) => {
     if (q.followup === 'due') { where.push(`c.status = 'Follow-up' AND pr.admission_status = 'Follow-up' AND pr.followup_date <= @today`); p.today = today(); }
     if (q.review === 'pending') where.push('pr.id IS NOT NULL AND pr.reviewed_at IS NULL');
     if (q.result && ADMISSION.includes(q.result)) { where.push('pr.admission_status = @res'); p.res = q.result; }
+    // Day the result was entered (IST); used by the dashboard's "Pre-tests by result" chart.
+    if (q.result_from && isValidDate(q.result_from)) { where.push(`pr.id IS NOT NULL AND ${istDay('pr.submitted_at')} >= @rf`); p.rf = q.result_from; }
+    if (q.result_to && isValidDate(q.result_to)) { where.push(`pr.id IS NOT NULL AND ${istDay('pr.submitted_at')} <= @rt`); p.rt = q.result_to; }
     const sql = `${SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
       ORDER BY (c.pretest_at IS NULL) DESC, c.pretest_at ASC, c.id DESC LIMIT 1000`;
     let rows = await db.all(sql, p);

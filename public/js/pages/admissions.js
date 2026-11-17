@@ -1,6 +1,6 @@
 import {
   api, get, esc, html, raw, pill, inr, fmtDate, fmtStamp, table, drawer, onSubmit, options, teacherOptions,
-  setQuery, toast, uid, todayLocal, stateBox, addDays,
+  setQuery, toast, uid, todayLocal, stateBox, addDays, linkedFilters, wireLinked, clearLinked,
 } from '../core.js';
 import { historyList, shrinkImage, guessType, toBase64 } from './pretests.js';
 
@@ -278,6 +278,7 @@ function monthEnd(offset) { return addDays(monthStart(offset + 1), -1); }
 
 export async function renderPayments(page, { query }) {
   const f = Object.fromEntries(PAY_KEYS.map(k => [k, query[k] || '']));
+  const linked = linkedFilters(query, ['teacher', 'sales_rep', 'format']);
   page.innerHTML = html`<div class="page-head"><div><h1>Payments</h1>
     <div class="sub">Paid counts as collected. Pending is outstanding; it becomes overdue only after its due date.</div></div></div>
     <form class="filters" id="pf" role="search" aria-label="Filter payments">
@@ -286,8 +287,10 @@ export async function renderPayments(page, { query }) {
       <div class="field"><label for="p-stage">Stage</label><select id="p-stage" name="stage">${raw(options(['Advance', 'Final'], f.stage, 'Both'))}</select></div>
       <div class="field"><label for="p-from">Date from</label><input id="p-from" name="date_from" type="date" value="${f.date_from}"></div>
       <div class="field"><label for="p-to">Date to</label><input id="p-to" name="date_to" type="date" value="${f.date_to}"></div>
+      ${raw(linked.hidden)}
       <button class="btn" type="button" id="p-clear">Clear filters</button>
     </form>
+    ${raw(linked.note)}
     <div class="chips" id="p-range" role="group" aria-label="Date range">
       <button type="button" class="rchip" data-range="this">This month</button>
       <button type="button" class="rchip" data-range="last">Last month</button>
@@ -337,7 +340,8 @@ export async function renderPayments(page, { query }) {
     form.querySelector('#p-to').value = off === undefined ? '' : monthEnd(off);
     load();
   });
-  page.querySelector('#p-clear').addEventListener('click', () => { form.reset(); form.querySelectorAll('input,select').forEach(x => { x.value = ''; }); load(); });
+  wireLinked(page, load);
+  page.querySelector('#p-clear').addEventListener('click', () => { clearLinked(page); form.reset(); form.querySelectorAll('input,select').forEach(x => { x.value = ''; }); load(); });
   list.addEventListener('click', async e => {
     const p = e.target.closest('[data-pay]'); const h = e.target.closest('[data-hist]');
     if (p) paymentForm(rows.find(x => String(x.id) === p.dataset.pay), load);

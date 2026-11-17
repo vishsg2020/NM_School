@@ -491,3 +491,31 @@ a.kpi:hover { border-color: #B7C4BE; }
 .sp-terms-h { font-size: 16px; margin: 18px 0 6px; }
 .sp-terms { font-size: 14px; padding-left: 20px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px 10px 30px; }
 .sp-terms li { margin-bottom: 6px; }
+
+/* ---------- Dashboard charts (Manager) ---------- */
+.trend-title { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 24px 0 10px; }
+.trend-title h2 { font-size: 20px; }
+.chart { display: block; width: 100%; height: auto; font: 12px var(--sans); fill: var(--muted); }
+.chart .grid { stroke: #E6EBE8; stroke-width: 1; }
+.chart .val { fill: var(--ink); font-weight: 600; }
+.chart .note { fill: var(--muted); font-weight: 400; }
+.chart .cbar { fill: var(--brand); }
+.chart .cbar.red { fill: var(--red); }
+.chart .cbar.amber { fill: var(--turmeric); }
+.chart .cbar.grey { fill: #B9C3BE; }
+.chart .hit { fill: transparent; }
+.chart a { cursor: pointer; }
+.chart a:hover .cbar, .chart a:focus .cbar { fill: var(--green); }
+.chart a:hover .cbar.red, .chart a:focus .cbar.red { fill: #7E2A1F; }
+.chart a:hover .cbar.amber, .chart a:focus .cbar.amber { fill: var(--turmeric-ink); }
+.chart a:hover .cbar.grey, .chart a:focus .cbar.grey { fill: var(--muted); }
+.chart a:focus { outline: none; }
+.chart a:focus .hit { fill: var(--green-soft); }
+.chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; margin-top: 16px; }
+.chart-grid .panel + .panel { margin-top: 0; }
+.chart-grid .panel > p.small { margin: 2px 0 8px; }
+.trend-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+.trend-head h2 { margin: 0; }
+.top-gap { margin-top: 16px; }
+.linked-note { margin-top: -4px; }
+@media (max-width: 960px) { .chart-grid { grid-template-columns: 1fr; } }

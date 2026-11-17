@@ -102,6 +102,8 @@ module.exports = (app, { db }) => {
     if (q.date && isValidDate(q.date)) { where.push('substr(cl.scheduled_at,1,10) = @date'); p.date = q.date; }
     if (q.date_from && isValidDate(q.date_from)) { where.push('substr(cl.scheduled_at,1,10) >= @df'); p.df = q.date_from; }
     if (q.date_to && isValidDate(q.date_to)) { where.push('substr(cl.scheduled_at,1,10) <= @dt'); p.dt = q.date_to; }
+    if (q.sales_rep && req.user.role === 'manager') { where.push('e.sales_rep_id = @rep'); p.rep = idParam(q.sales_rep); }
+    if (q.format === '1:1' || q.format === '3:1') { where.push('cl.format = @fmt'); p.fmt = q.format; }
     if (q.q) { where.push('(c.student_name ILIKE @q OR cl.class_code ILIKE @q OR c.lead_id ILIKE @q)'); p.q = `%${q.q}%`; }
     const order = q.order === 'asc' ? 'ASC' : 'DESC';
     const rows = await db.all(`${SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY cl.scheduled_at ${order}, cl.id LIMIT 2000`, p);

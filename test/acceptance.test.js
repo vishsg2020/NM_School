@@ -833,3 +833,117 @@ test('Round 3: student sorting, payment totals, class change/delete/reset, all-t
   await M.put('/api/settings/terms', { terms: '' });
   assert.equal((await anon.get(`/api/public/student/${renewed}`)).data.terms.length, 5); // back to the default
 });
+
+test('Dashboard charts: Manager only; totals match the Payments, Students, Classes and Pre-Test lists', async () => {
+  // Make sure a completed 3:1 group exists, so the "sessions" rule is really tested.
+  const group = await db.all(`SELECT id FROM classes WHERE format = '3:1' AND scheduled_at = '2026-10-20T11:00' AND status = 'Scheduled'`);
+  assert.ok(group.length >= 2, 'the 3:1 test should have left a group of students');
+  process.env.TODAY_OVERRIDE = '2026-10-21';
+  try {
+    for (const g of group) {
+      const r = await M.patch(`/api/classes/${g.id}`, { status: 'Completed', attendance: 'Present' });
+      assert.equal(r.status, 200, JSON.stringify(r.data));
+    }
+  } finally { process.env.TODAY_OVERRIDE = '2026-10-15'; }
+
+  // Server-side role check
+  assert.equal((await S.get('/api/dashboard/trends')).status, 403);
+  assert.equal((await T1.get('/api/dashboard/trends')).status, 403);
+  assert.equal((await anon.get('/api/dashboard/trends')).status, 401);
+  assert.equal((await M.get('/api/dashboard/trends?date_from=2026-10-31&date_to=2026-10-01')).status, 400);
+  assert.equal((await M.get('/api/dashboard/trends?format=2:1')).status, 400);
+  assert.equal((await M.get('/api/dashboard/trends?date_from=2026-13-01')).status, 400);
+
+  const qs = o => '?' + new URLSearchParams(Object.entries(o).filter(([, v]) => v !== '' && v != null));
+  const sum = (a, k) => a.reduce((s, r) => s + r[k], 0);
+  const cases = [
+    {}, // all time
+    { date_from: '2026-10-01', date_to: '2026-10-31' }, // this month (test "today" is 15 Oct)
+    { date_from: '2026-09-01', date_to: '2026-09-30' }, // last month
+    { date_from: '2025-11-01', date_to: '2026-10-31' }, // last 12 months
+    { date_from: '2026-10-02', date_to: '2026-10-02' }, // one day
+    { teacher: teacherA },
+    { teacher: teacherA, format: '3:1', date_from: '2026-10-01', date_to: '2026-10-31' },
+    { sales_rep: salesId },
+    { sales_rep: managerId, format: '1:1' },
+  ];
+  let sawGroup = false;
+  for (const c of cases) {
+    const label = JSON.stringify(c);
+    const r = await M.get('/api/dashboard/trends' + qs(c));
+    assert.equal(r.status, 200, label + JSON.stringify(r.data));
+    const t = r.data; const tt = t.totals;
+    const f = { teacher: c.teacher, sales_rep: c.sales_rep, format: c.format };
+    const range = { date_from: c.date_from, date_to: c.date_to };
+
+    // Fees collected = Paid payments on the Payments page for the same dates and filters
+    const paid = (await M.get('/api/payments' + qs({ status: 'Paid', ...range, ...f }))).data;
+    assert.equal(tt.fees, paid.totals.paid, label); assert.equal(tt.fees_count, paid.rows.length, label);
+    if (!c.teacher && !c.sales_rep && !c.format) assert.equal(tt.fees, paid.summary.received, label + ' (Payments headline)');
+    assert.equal(sum(t.fees, 'amount'), tt.fees, label + ' fee bars add up');
+    assert.equal(sum(t.byRep, 'amount'), tt.fees, label + ' rep bars add up');
+    // Each fee bar opens exactly its payments
+    for (const b of t.fees.filter(x => x.payments)) {
+      const a = t.group === 'month' ? b.period + '-01' : b.period;
+      let z = t.group === 'month' ? new Date(Date.UTC(+b.period.slice(0, 4), +b.period.slice(5, 7), 0)).toISOString().slice(0, 10)
+        : t.group === 'week' ? new Date(Date.parse(b.period) + 6 * 864e5).toISOString().slice(0, 10) : b.period;
+      const lo = c.date_from && a < c.date_from ? c.date_from : a; if (c.date_to && z > c.date_to) z = c.date_to;
+      const list = (await M.get('/api/payments' + qs({ status: 'Paid', date_from: lo, date_to: z, ...f }))).data;
+      assert.equal(list.totals.paid, b.amount, label + ' bar ' + b.period); assert.equal(list.rows.length, b.payments);
+    }
+    for (const b of t.byRep) {
+      const list = (await M.get('/api/payments' + qs({ status: 'Paid', ...range, ...f, sales_rep: b.id }))).data;
+      assert.equal(list.totals.paid, b.amount, label + ' rep ' + b.label);
+    }
+
+    // Pending and overdue: everything still open (the period does not apply), same as the Payments page
+    const pend = (await M.get('/api/payments' + qs({ status: 'Pending', ...f }))).data;
+    assert.equal(tt.pending, pend.totals.pending, label); assert.equal(tt.overdue, pend.totals.overdue, label);
+    if (!c.teacher && !c.sales_rep && !c.format) { assert.equal(tt.pending, pend.summary.pending); assert.equal(tt.overdue, pend.summary.overdue); }
+    const notDue = (await M.get('/api/payments' + qs({ status: 'Pending', date_from: '2026-10-15', ...f }))).data;
+    assert.equal(t.open.find(o => o.key === 'not_due').amount, notDue.totals.pending, label + ' not yet due');
+    assert.equal(t.open.find(o => o.key === 'overdue').payments, (await M.get('/api/payments' + qs({ status: 'Overdue', ...f }))).data.rows.length);
+
+    // New admissions = students admitted in the period on the Students page (one enrollment per student)
+    const studs = (await M.get('/api/students' + qs({ status: 'enrolled', admitted_from: c.date_from, admitted_to: c.date_to, ...f }))).data;
+    assert.equal(tt.admissions, studs.length, label + ' admissions');
+    assert.equal(tt.admissions_1to1 + tt.admissions_3to1, tt.admissions);
+    assert.equal(sum(t.admissions, 'admissions'), tt.admissions, label + ' admission bars add up');
+    for (const b of t.admissions.filter(x => x.admissions)) {
+      const end = new Date(Date.UTC(+b.period.slice(0, 4), +b.period.slice(5, 7), 0)).toISOString().slice(0, 10);
+      const lst = (await M.get('/api/students' + qs({ status: 'enrolled', admitted_from: b.period + '-01', admitted_to: end, ...f }))).data;
+      assert.equal(lst.length, b.admissions, label + ' admissions ' + b.period);
+    }
+
+    // Classes completed: the Class Activity list shows one row per student; sessions count a 3:1 group once
+    const cls = (await M.get('/api/classes' + qs({ status: 'Completed', ...range, ...f }))).data;
+    assert.equal(tt.class_records, cls.length, label + ' class records');
+    const keys = new Set(cls.map(x => (x.format === '3:1' ? `${x.teacher_id}@${x.scheduled_at}` : 'c' + x.id)));
+    assert.equal(tt.sessions, keys.size, label + ' sessions');
+    if (tt.sessions < tt.class_records) sawGroup = true;
+    assert.equal(sum(t.byTeacher, 'sessions'), tt.sessions);
+    for (const b of t.byTeacher) {
+      const lst = (await M.get('/api/classes' + qs({ status: 'Completed', ...range, ...f, teacher: b.id }))).data;
+      assert.equal(lst.length, b.class_records, label + ' teacher ' + b.label);
+    }
+
+    // Pre-tests by result: the day the result was entered (IST); each bar opens exactly its candidates
+    assert.deepEqual(t.byResult.map(x => x.label), ['Confirmed', 'Follow-up', 'Not Interested']);
+    for (const b of t.byResult) {
+      const lst = (await M.get('/api/candidates' + qs({ result: b.label, result_from: c.date_from, result_to: c.date_to, teacher: c.teacher, sales_rep: c.sales_rep }))).data;
+      assert.equal(lst.length, b.n, label + ' result ' + b.label);
+    }
+    assert.equal(t.format_ignored_for_pretests, Boolean(c.format));
+  }
+  assert.ok(sawGroup, 'a completed 3:1 group should count as one session');
+
+  // Grouping: automatic picks day / week / month; a chosen unit is kept; empty days still appear as 0
+  const day = (await M.get('/api/dashboard/trends?date_from=2026-10-01&date_to=2026-10-31')).data;
+  assert.equal(day.group, 'day'); assert.equal(day.fees.length, 31); assert.equal(day.fees[0].period, '2026-10-01');
+  assert.equal((await M.get('/api/dashboard/trends?date_from=2026-08-01&date_to=2026-10-31')).data.group, 'week');
+  const yr = (await M.get('/api/dashboard/trends?date_from=2025-11-01&date_to=2026-10-31')).data;
+  assert.equal(yr.group, 'month'); assert.equal(yr.fees.length, 12); assert.equal(yr.admissions.length, 12);
+  const wk = (await M.get('/api/dashboard/trends?date_from=2026-10-01&date_to=2026-10-31&group=week')).data;
+  assert.equal(wk.group, 'week'); assert.equal(wk.fees[0].period, '2026-09-28'); // the Monday of the week holding 1 Oct
+  assert.equal((await M.get('/api/dashboard/trends?date_from=2020-01-01&date_to=2026-10-31&group=day')).status, 400); // too many bars
+});

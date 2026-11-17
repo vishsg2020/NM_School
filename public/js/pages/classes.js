@@ -1,6 +1,7 @@
 import {
   state, api, get, esc, html, raw, pill, fmtDate, fmtTime, fmtDT, table, drawer, onSubmit, options, opt, teacherOptions,
   setQuery, can, toast, todayLocal, addDays, stateBox, ApiError, WEEKDAYS, starInput, wireStars, starsText, feedbackUrl, copyText,
+  linkedFilters, wireLinked, clearLinked,
 } from '../core.js';
 
 const STATUSES = ['Scheduled', 'Completed', 'Cancelled', 'Student Absent', 'Teacher Absent', 'Rescheduled'];
@@ -17,6 +18,7 @@ export async function renderActivity(page, { query }) {
   saveView(view);
   const month = /^\d{4}-\d{2}$/.test(query.month || '') ? query.month : (f.date || todayLocal()).slice(0, 7);
   const students = await get('/api/students');
+  const linked = linkedFilters(query, isMgr && view === 'list' ? ['sales_rep', 'format'] : []);
   page.innerHTML = html`<div class="page-head"><div><h1>Class Activity</h1>
     <div class="sub">Record attendance, topics, homework and progress. Completing a class counts it once against the package.</div></div>
     <div class="actions"><div class="seg" role="radiogroup" aria-label="View">
@@ -31,8 +33,10 @@ export async function renderActivity(page, { query }) {
       <div class="field"><label for="c-from">From</label><input id="c-from" name="date_from" type="date" value="${f.date_from}"></div>
       <div class="field"><label for="c-to">To</label><input id="c-to" name="date_to" type="date" value="${f.date_to}"></div>` : '')}
       <div class="field grow"><label for="c-q">Search</label><input id="c-q" name="q" type="search" value="${f.q}" placeholder="Class ID, student, Lead ID"></div>
+      ${raw(linked.hidden)}
       <button class="btn" type="button" id="c-clear">Clear filters</button>
     </form>
+    ${raw(linked.note)}
     <p class="result-count" id="c-count" aria-live="polite"></p>
     <div id="c-list">${raw(stateBox('loading'))}</div>`;
   const form = page.querySelector('#cf'); const list = page.querySelector('#c-list');
@@ -81,7 +85,8 @@ export async function renderActivity(page, { query }) {
   let t;
   form.addEventListener('input', e => { clearTimeout(t); t = setTimeout(load, e.target.type === 'search' ? 250 : 0); });
   form.addEventListener('submit', e => { e.preventDefault(); load(); });
-  page.querySelector('#c-clear').addEventListener('click', () => { form.querySelectorAll('input,select').forEach(x => { x.value = ''; }); load(); });
+  wireLinked(page, load);
+  page.querySelector('#c-clear').addEventListener('click', () => { clearLinked(page); form.querySelectorAll('input,select').forEach(x => { x.value = ''; }); load(); });
   list.addEventListener('click', e => {
     const del = e.target.closest('[data-del]');
     if (del) { del.closest('details')?.removeAttribute('open'); deleteClass(rows.find(r => String(r.id) === del.dataset.del), load); return; }
